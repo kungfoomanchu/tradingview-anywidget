@@ -287,6 +287,74 @@ class LightweightChartWidget(anywidget.AnyWidget):
         return series_config
 
     @staticmethod
+    def sma(df, period=20, column="close", time_column="date", **options):
+        """Create a Simple Moving Average line series from a DataFrame.
+
+        Computes SMA in pure Python - no extra dependencies needed.
+        """
+        records = _df_to_records(df)
+        records = _normalize_ohlcv_keys(records)
+        records = _ensure_time_key(records, time_column)
+        col = column.lower()
+        values = [_safe_float(r[col]) for r in records if col in r]
+        times = [r["time"] for r in records if col in r]
+        data = []
+        for i in range(len(values)):
+            if i < period - 1:
+                continue
+            window = values[i - period + 1 : i + 1]
+            if any(v is None for v in window):
+                continue
+            avg = sum(window) / period
+            data.append({"time": times[i], "value": round(avg, 4)})
+        defaults = {
+            "color": "#FF6D00",
+            "lineWidth": 1,
+            "priceLineVisible": False,
+            "lastValueVisible": False,
+        }
+        defaults.update(options)
+        return {"type": "Line", "data": data, "options": defaults}
+
+    @staticmethod
+    def ema(df, period=20, column="close", time_column="date", **options):
+        """Create an Exponential Moving Average line series from a DataFrame.
+
+        Computes EMA in pure Python - no extra dependencies needed.
+        """
+        records = _df_to_records(df)
+        records = _normalize_ohlcv_keys(records)
+        records = _ensure_time_key(records, time_column)
+        col = column.lower()
+        values = [_safe_float(r[col]) for r in records if col in r]
+        times = [r["time"] for r in records if col in r]
+        multiplier = 2 / (period + 1)
+        data = []
+        ema_val = None
+        for i, v in enumerate(values):
+            if v is None:
+                continue
+            if ema_val is None:
+                if i >= period - 1:
+                    # Seed with SMA of first `period` values
+                    window = values[i - period + 1 : i + 1]
+                    if any(x is None for x in window):
+                        continue
+                    ema_val = sum(window) / period
+                    data.append({"time": times[i], "value": round(ema_val, 4)})
+            else:
+                ema_val = (v - ema_val) * multiplier + ema_val
+                data.append({"time": times[i], "value": round(ema_val, 4)})
+        defaults = {
+            "color": "#2196F3",
+            "lineWidth": 1,
+            "priceLineVisible": False,
+            "lastValueVisible": False,
+        }
+        defaults.update(options)
+        return {"type": "Line", "data": data, "options": defaults}
+
+    @staticmethod
     def markers(time, position="belowBar", shape="arrowUp", color="#2196F3", text="", size=1):
         """Create a single marker dict.
 

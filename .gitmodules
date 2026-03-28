@@ -1,0 +1,3 @@
+[submodule "lightweight-charts"]
+	path = lightweight-charts
+	url = https://github.com/tradingview/lightweight-charts.git

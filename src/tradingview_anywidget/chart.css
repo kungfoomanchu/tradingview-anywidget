@@ -1,0 +1,36 @@
+.lwc-container {
+  position: relative;
+  width: 100%;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.lwc-legend {
+  position: absolute;
+  top: 8px;
+  left: 12px;
+  z-index: 10;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 12px;
+  pointer-events: none;
+  color: #434651;
+}
+
+.lwc-legend-item {
+  margin-right: 12px;
+}
+
+.lwc-val {
+  font-weight: 600;
+  margin-left: 2px;
+  color: #131722;
+}
+
+@media (prefers-color-scheme: dark) {
+  .lwc-legend {
+    color: #787b86;
+  }
+  .lwc-val {
+    color: #d1d4dc;
+  }
+}

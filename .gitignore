@@ -17,5 +17,9 @@ build/
 .DS_Store
 Thumbs.db
 
+# Claude/agent local settings (not shared)
+.claude/settings.json
+.claude/settings.local.json
+
 # Reference images (not needed in repo)
 example_pictures/

@@ -53,6 +53,30 @@ git add lightweight-charts
 git commit -m "Update lightweight-charts submodule"
 ```
 
+### Agent skills
+
+This project includes AI agent skills (in `.agents/skills/` and `.claude/skills/`) managed by [skills.sh](https://skills.sh). These provide coding agents with domain knowledge about marimo notebooks and anywidget development.
+
+**Install skills into a fresh clone:**
+
+```bash
+npx skills add marimo-team/skills
+```
+
+**Check for updates:**
+
+```bash
+npx skills check
+```
+
+**Update all skills to latest:**
+
+```bash
+npx skills update
+```
+
+The `skills-lock.json` file pins skill versions. Commit it after updating so collaborators stay in sync.
+
 ### Run the demo notebook
 
 ```bash

@@ -59,6 +59,11 @@ See [examples/demo.py](examples/demo.py) for a full interactive demo.
 - **Events**: Crosshair move, click (with OHLC data), visible time range change (bidirectional)
 - **Basic chart options**: Layout (background, textColor), grid (line colors), crosshair mode
 - **Python helpers**: SMA, EMA, volume overlay, dark/light themes, pandas/polars DataFrame conversion
+- **pandas-ta integration** (optional `pip install pandas-ta`):
+  - Generic `W.pta(df, "indicator_name")` works with any of 200+ indicators
+  - 10 curated helpers with smart defaults: `pta_rsi`, `pta_macd`, `pta_bbands`, `pta_stoch`, `pta_atr`, `pta_adx`, `pta_obv`, `pta_supertrend`, `pta_vwap`, `pta_ichimoku`
+  - Auto-detects overlay vs oscillator scale placement
+  - Built-in overbought/oversold reference lines (RSI, Stochastic), green/red histogram (MACD), directional coloring (Supertrend)
 
 ### What is NOT yet wrapped
 

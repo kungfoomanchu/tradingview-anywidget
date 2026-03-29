@@ -10,9 +10,16 @@ When wrapping additional lightweight-charts features (new traitlets, JS event ha
 
 Look for the `<!-- COVERAGE-NOTE -->` comment in README.md as a reminder.
 
-## Phase 2: pandas-ta Integration
+## pandas-ta Integration (Implemented)
 
-A future goal is to integrate [pandas-ta](https://github.com/twopirllc/pandas-ta) for technical indicators. This will add helpers like `W.rsi()`, `W.macd()`, `W.bollinger_bands()`, etc. that compute indicators via pandas-ta and return series configs. Multi-pane support (see coverage gaps) will be needed for indicators like RSI that belong on a separate pane.
+pandas-ta is now integrated as an optional dependency (`pip install pandas-ta`). All TA methods are prefixed with `pta_` (e.g., `W.pta_rsi()`, `W.pta_macd()`). A generic `W.pta(df, "indicator_name")` method works with any of the 200+ pandas-ta indicators.
+
+- 10 curated helpers: `pta_rsi`, `pta_macd`, `pta_bbands`, `pta_stoch`, `pta_atr`, `pta_adx`, `pta_obv`, `pta_supertrend`, `pta_vwap`, `pta_ichimoku`
+- Oscillators auto-detect separate price scale placement
+- Single-series helpers return `dict`, multi-series return `list[dict]`
+- Polars users must call `.to_pandas()` first (pandas-ta requires pandas)
+
+When adding new curated `pta_*` helpers, follow the existing pattern and update the README coverage section.
 
 ## Project Structure
 

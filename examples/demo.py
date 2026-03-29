@@ -6,6 +6,7 @@
 #     "traitlets>=5.0.0",
 #     "yfinance>=0.2.0",
 #     "pandas>=1.5.0",
+#     "pandas-ta>=0.3.14b",
 #     "tradingview-anywidget",
 # ]
 # ///
@@ -475,6 +476,282 @@ def _(W, df, mo):
         )
     )
     mo.hstack([small_line, small_area, small_hist], widths="equal", gap=0.5)
+    return
+
+
+# =====================================================================
+# pandas-ta Technical Indicators
+# =====================================================================
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    # pandas-ta Technical Indicators
+
+    The `pta_` methods integrate [pandas-ta](https://github.com/twopirllc/pandas-ta)
+    for 200+ technical analysis indicators. Install with `pip install pandas-ta`.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ## 11. RSI (Relative Strength Index)
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    rsi_length = mo.ui.slider(start=5, stop=50, value=14, step=1, label="RSI length")
+    rsi_length
+    return (rsi_length,)
+
+
+@app.cell
+def _(W, df, mo, rsi_length):
+    chart_rsi = mo.ui.anywidget(
+        W(
+            series_data=[W.candlestick(df), W.volume(df), W.pta_rsi(df, length=rsi_length.value)],
+            chart_options=W.dark_theme(),
+            height=500,
+        )
+    )
+    chart_rsi
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ## 12. MACD (Moving Average Convergence Divergence)
+    """)
+    return
+
+
+@app.cell
+def _(W, df, mo):
+    chart_macd = mo.ui.anywidget(
+        W(
+            series_data=[W.candlestick(df), W.volume(df)] + W.pta_macd(df),
+            chart_options=W.dark_theme(),
+            height=500,
+        )
+    )
+    chart_macd
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ## 13. Bollinger Bands
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    bb_length = mo.ui.slider(start=10, stop=50, value=20, step=1, label="BB length")
+    bb_std = mo.ui.slider(start=1.0, stop=3.0, value=2.0, step=0.5, label="BB std dev")
+    mo.hstack([bb_length, bb_std], justify="start", gap=1)
+    return bb_length, bb_std
+
+
+@app.cell
+def _(W, bb_length, bb_std, df, mo):
+    chart_bb = mo.ui.anywidget(
+        W(
+            series_data=[W.candlestick(df), W.volume(df)] + W.pta_bbands(df, length=bb_length.value, std=bb_std.value),
+            chart_options=W.dark_theme(),
+            height=450,
+        )
+    )
+    chart_bb
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ## 14. Stochastic Oscillator
+    """)
+    return
+
+
+@app.cell
+def _(W, df, mo):
+    chart_stoch = mo.ui.anywidget(
+        W(
+            series_data=[W.candlestick(df), W.volume(df)] + W.pta_stoch(df),
+            chart_options=W.dark_theme(),
+            height=500,
+        )
+    )
+    chart_stoch
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ## 15. Supertrend Overlay
+    """)
+    return
+
+
+@app.cell
+def _(W, df, mo):
+    chart_st = mo.ui.anywidget(
+        W(
+            series_data=[W.candlestick(df), W.volume(df), W.pta_supertrend(df)],
+            chart_options=W.dark_theme(),
+            height=450,
+        )
+    )
+    chart_st
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ## 16. ATR, ADX & OBV
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    sub_indicator = mo.ui.dropdown(
+        options=["ATR", "ADX", "OBV"],
+        value="ATR",
+        label="Indicator",
+    )
+    sub_indicator
+    return (sub_indicator,)
+
+
+@app.cell
+def _(W, df, mo, sub_indicator):
+    if sub_indicator.value == "ATR":
+        ind_series = W.pta_atr(df)
+    elif sub_indicator.value == "ADX":
+        ind_series = W.pta_adx(df)
+    else:
+        ind_series = W.pta_obv(df)
+
+    chart_sub = mo.ui.anywidget(
+        W(
+            series_data=[W.candlestick(df), W.volume(df), ind_series],
+            chart_options=W.dark_theme(),
+            height=500,
+        )
+    )
+    chart_sub
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ## 17. VWAP (Volume Weighted Average Price)
+    """)
+    return
+
+
+@app.cell
+def _(W, df, mo):
+    chart_vwap = mo.ui.anywidget(
+        W(
+            series_data=[W.candlestick(df), W.volume(df), W.pta_vwap(df)],
+            chart_options=W.dark_theme(),
+            height=450,
+        )
+    )
+    chart_vwap
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ## 18. Ichimoku Cloud
+    """)
+    return
+
+
+@app.cell
+def _(W, df, mo):
+    chart_ich = mo.ui.anywidget(
+        W(
+            series_data=[W.candlestick(df)] + W.pta_ichimoku(df),
+            chart_options=W.dark_theme(),
+            height=500,
+        )
+    )
+    chart_ich
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ## 19. Generic `W.pta()` - Any pandas-ta Indicator
+
+    Use the dropdown to pick any indicator category, then select a specific
+    indicator. This uses the generic `W.pta(df, indicator_name, **kwargs)` method.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    indicator_options = {
+        "Momentum": ["rsi", "macd", "stoch", "stochrsi", "cci", "mfi", "willr", "roc", "ao", "uo", "ppo"],
+        "Overlap": ["sma", "ema", "dema", "tema", "wma", "hma", "zlma", "kama", "vwma"],
+        "Volatility": ["bbands", "atr", "natr", "kc", "donchian", "true_range"],
+        "Trend": ["adx", "aroon", "supertrend", "chop"],
+        "Volume": ["obv", "cmf", "ad", "efi", "mfi", "pvt"],
+    }
+    category_dd = mo.ui.dropdown(
+        options=list(indicator_options.keys()),
+        value="Momentum",
+        label="Category",
+    )
+    category_dd
+    return category_dd, indicator_options
+
+
+@app.cell
+def _(category_dd, indicator_options, mo):
+    indicators_in_cat = indicator_options[category_dd.value]
+    indicator_dd = mo.ui.dropdown(
+        options=indicators_in_cat,
+        value=indicators_in_cat[0],
+        label="Indicator",
+    )
+    indicator_dd
+    return (indicator_dd,)
+
+
+@app.cell
+def _(W, df, indicator_dd, mo):
+    _name = indicator_dd.value
+    try:
+        _configs = W.pta(df, _name)
+        chart_generic = mo.ui.anywidget(
+            W(
+                series_data=[W.candlestick(df), W.volume(df)] + _configs,
+                chart_options=W.dark_theme(),
+                height=500,
+            )
+        )
+        chart_generic
+    except Exception as e:
+        mo.md(f"**Error computing `{_name}`:** {e}")
     return
 
 

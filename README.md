@@ -39,7 +39,7 @@ Indicators that aren't on the price scale go in their own pane below the chart:
 series_data = [W.candlestick(df), W.volume(df), W.pta_rsi(df)] + W.pta_macd(df, pane=2)
 ```
 
-See [examples/demo.py](examples/demo.py) for a full interactive demo.
+See [examples/demo.py](examples/demo.py): an interactive playground with every feature on one chart, followed by a reference section explaining each feature with its code.
 
 ### Data
 
@@ -61,7 +61,7 @@ Each helper returns a plain dict you can edit before passing it in `series_data`
 | `data` | List of points, e.g. `{"time": "2024-01-15", "value": 1.5}` |
 | `options` | Series options (`color`, `title`, `priceScaleId`, ...) |
 | `pane` | Pane index: `0` = main price pane (default), `1`+ = panes below it |
-| `priceScale` | Options for the series' price scale (e.g. `scaleMargins`) |
+| `priceScale` | Options for the series' price scale in its own pane (e.g. `scaleMargins`, `mode`) |
 | `markers` | List of `W.marker(...)` dicts |
 | `price_lines` | List of `W.price_line(...)` dicts |
 

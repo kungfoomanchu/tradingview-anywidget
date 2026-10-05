@@ -22,6 +22,9 @@ const SERIES_TYPES = {
 // Panes below the main price pane get this share of the height relative to it
 const SUB_PANE_STRETCH = 0.4;
 
+// Library defaults for the price scale options a series config can change
+const SCALE_DEFAULTS = { mode: 0, autoScale: true, invertScale: false, scaleMargins: { top: 0.2, bottom: 0.1 } };
+
 // Limit how often mouse/scroll events are sent to Python
 const CROSSHAIR_THROTTLE_MS = 100;
 const RANGE_DEBOUNCE_MS = 250;
@@ -119,6 +122,15 @@ function render({ model, el }) {
     }
     seriesList = [];
 
+    // Options applied to a series' left/right price scale are also merged into the
+    // chart-wide defaults, which panes created later copy. Reset those defaults to
+    // the chart_options values so a previous render can't leak into new panes.
+    const chartOptions = model.get("chart_options") || {};
+    chart.applyOptions({
+      leftPriceScale: { ...SCALE_DEFAULTS, ...(chartOptions.leftPriceScale || {}) },
+      rightPriceScale: { ...SCALE_DEFAULTS, ...(chartOptions.rightPriceScale || {}) },
+    });
+
     for (const config of model.get("series_data") || []) {
       const SeriesType = SERIES_TYPES[config.type];
       if (!SeriesType) {
@@ -128,9 +140,6 @@ function render({ model, el }) {
 
       // A pane index past the last pane creates a new pane
       const series = chart.addSeries(SeriesType, config.options || {}, config.pane || 0);
-      if (config.priceScale) {
-        series.priceScale().applyOptions(config.priceScale);
-      }
       if (config.data && config.data.length > 0) {
         series.setData(config.data);
       }
@@ -142,6 +151,14 @@ function render({ model, el }) {
         series.createPriceLine(pl);
       }
       seriesList.push({ series, config });
+    }
+
+    // Apply price scale options only once every pane exists, so they reach just
+    // the series' own pane (see the reset above)
+    for (const { series, config } of seriesList) {
+      if (config.priceScale) {
+        series.priceScale().applyOptions(config.priceScale);
+      }
     }
 
     const panes = chart.panes();

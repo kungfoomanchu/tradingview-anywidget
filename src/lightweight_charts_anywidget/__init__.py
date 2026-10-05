@@ -80,6 +80,19 @@ def _convert_times(values):
     return [None if _is_missing(v) else v.strftime("%Y-%m-%d") for v in values]
 
 
+def _point_time(value, data):
+    """Convert one time to the format already used by `data` (date string or unix seconds)."""
+    if not isinstance(value, datetime.date):
+        return value
+    if data and isinstance(data[-1]["time"], str):
+        return value.strftime("%Y-%m-%d")
+    if data or (isinstance(value, datetime.datetime) and value.time() != datetime.time()):
+        if not isinstance(value, datetime.datetime):
+            value = datetime.datetime.combine(value, datetime.time())
+        return _to_unix_seconds(value)
+    return value.strftime("%Y-%m-%d")
+
+
 def _time_values(df, time_column="date"):
     """Return the time of each row, from `time_column`, a common time column, or the index."""
     for candidate in (time_column, *_TIME_COLUMNS):
@@ -279,12 +292,14 @@ class LightweightChartWidget(anywidget.AnyWidget):
         chart_options: Dict of chart-level options (layout, grid, crosshair, etc.)
         width: Chart width in pixels (0 = fill the container width)
         height: Chart height in pixels
-        watermark: Watermark configuration dict
+        watermark: Watermark dict ({"text": ...} or W.image_watermark(...)), or a list of them
+        pane_heights: Relative pane heights, e.g. [3, 1, 1] (empty = sub panes at 40% of the main pane)
         fit_content: Whether to auto-fit content when data changes
         visible_range: Time range to display {from, to} - bidirectional
         logical_range: Bar-index range to display {from, to} - bidirectional
         crosshair_data: Current crosshair position (read from JS)
         clicked_data: Last clicked data point (read from JS)
+        double_clicked_data: Last double-clicked data point (read from JS)
         visible_bars: First series' bars on screen {from, to, bars_before, bars_after} (read from JS)
     """
 
@@ -300,7 +315,10 @@ class LightweightChartWidget(anywidget.AnyWidget):
     height = traitlets.Int(400).tag(sync=True)
 
     # --- Overlays ---
-    watermark = traitlets.Dict({}).tag(sync=True)
+    watermark = traitlets.Union([traitlets.Dict(), traitlets.List()], default_value={}).tag(sync=True)
+
+    # --- Layout ---
+    pane_heights = traitlets.List([]).tag(sync=True)
 
     # --- Navigation ---
     fit_content = traitlets.Bool(True).tag(sync=True)
@@ -310,6 +328,7 @@ class LightweightChartWidget(anywidget.AnyWidget):
     # --- Events (JS -> Python) ---
     crosshair_data = traitlets.Dict({}).tag(sync=True)
     clicked_data = traitlets.Dict({}).tag(sync=True)
+    double_clicked_data = traitlets.Dict({}).tag(sync=True)
     visible_bars = traitlets.Dict({}).tag(sync=True)
 
     # ------------------------------------------------------------------
@@ -331,6 +350,29 @@ class LightweightChartWidget(anywidget.AnyWidget):
     def show_all(self):
         """Zoom out so every bar fits on screen (Lightweight Charts' fitContent)."""
         self.send({"command": "fitContent"})
+
+    def update(self, point, series=0):
+        """Add or replace the latest bar of a series without redrawing the chart (live data).
+
+        Args:
+            point: One data point, e.g. {"time": ..., "open": ..., "high": ...,
+                "low": ..., "close": ...} or {"time": ..., "value": ...}. `time` may be
+                a date/datetime; it's converted to the series' time format.
+            series: Index of the series in series_data.
+
+        A point with the same time as the latest bar replaces it; a later time adds
+        a new bar. Earlier times are ignored. series_data is updated in place too,
+        so Python sees the new bar, without redrawing the chart.
+        """
+        data = self.series_data[series].setdefault("data", [])
+        point = {**point, "time": _point_time(point["time"], data)}
+        if data and point["time"] == data[-1]["time"]:
+            data[-1] = point
+        elif not data or point["time"] > data[-1]["time"]:
+            data.append(point)
+        else:
+            return
+        self.send({"command": "update", "series": series, "point": point})
 
     # ------------------------------------------------------------------
     # Series builders
@@ -731,7 +773,7 @@ class LightweightChartWidget(anywidget.AnyWidget):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def marker(time, position="belowBar", shape="arrowUp", color="#2196F3", text="", size=1):
+    def marker(time, position="belowBar", shape="arrowUp", color="#2196F3", text="", size=1, id=None):
         """Create a single series marker dict.
 
         Args:
@@ -742,8 +784,10 @@ class LightweightChartWidget(anywidget.AnyWidget):
             color: Marker color
             text: Label text
             size: Marker size (1-4)
+            id: Optional id, reported as `hovered_object_id` in crosshair/click
+                events when the mouse is over the marker.
         """
-        return {
+        marker = {
             "time": time,
             "position": position,
             "shape": shape,
@@ -751,11 +795,14 @@ class LightweightChartWidget(anywidget.AnyWidget):
             "text": text,
             "size": size,
         }
+        if id is not None:
+            marker["id"] = id
+        return marker
 
     markers = marker  # backwards-compatible alias
 
     @staticmethod
-    def price_line(price, color="#FF0000", line_width=1, line_style=2, title=""):
+    def price_line(price, color="#FF0000", line_width=1, line_style=2, title="", id=None):
         """Create a price line config dict.
 
         Args:
@@ -765,8 +812,10 @@ class LightweightChartWidget(anywidget.AnyWidget):
             line_style: "solid", "dotted", "dashed", "large_dashed", "sparse_dotted"
                 (or 0-4)
             title: Label text
+            id: Optional id, reported as `hovered_object_id` in events when the
+                mouse is over the line.
         """
-        return {
+        line = {
             "price": price,
             "color": color,
             "lineWidth": line_width,
@@ -774,6 +823,9 @@ class LightweightChartWidget(anywidget.AnyWidget):
             "axisLabelVisible": True,
             "title": title,
         }
+        if id is not None:
+            line["id"] = id
+        return line
 
     @staticmethod
     def dark_theme():
@@ -941,6 +993,141 @@ class LightweightChartWidget(anywidget.AnyWidget):
                 else:
                     merged[key] = value
         return merged
+
+    @staticmethod
+    def crosshair(mode=None, color=None, width=None, style=None, labels=None, vert_line=None, horz_line=None):
+        """chart_options for the crosshair, as {"crosshair": {...}}.
+
+        Args:
+            mode: "normal" (follows the mouse), "magnet" (snaps to the close),
+                "magnet_ohlc" (snaps to the nearest open/high/low/close) or "hidden".
+            color, width, style: Both lines' color, width in pixels and line style
+                ("solid", "dotted", "dashed", "large_dashed", "sparse_dotted").
+            labels: Show the price and time labels on the axes.
+            vert_line / horz_line: Options for one line only, overriding the above,
+                e.g. {"visible": False} or {"label_background_color": "#333"}.
+        """
+        modes = {"normal": 0, "magnet": 1, "hidden": 2, "magnet_ohlc": 3}
+        if isinstance(mode, str):
+            if mode not in modes:
+                raise ValueError(f"Unknown crosshair mode {mode!r}. Use one of {list(modes)}")
+            mode = modes[mode]
+        both = _options({"color": color, "width": width, "style": style, "label_visible": labels})
+        if "style" in both:
+            both["style"] = _enum_value("lineStyle", both["style"])
+        result = _options({"mode": mode})
+        for key, line in (("vertLine", vert_line), ("horzLine", horz_line)):
+            line = _options(line or {})
+            if "style" in line:
+                line["style"] = _enum_value("lineStyle", line["style"])
+            if both or line:
+                result[key] = {**both, **line}
+        return {"crosshair": result}
+
+    @staticmethod
+    def number_format(locale=None, min_move=None, **intl_options):
+        """A price formatter built from JavaScript's Intl.NumberFormat options.
+
+        Use as a series' price_format (W.line(df, price_format=W.number_format(...)))
+        or in W.localization(price_formatter=...).
+
+        Args:
+            locale: e.g. "de-DE" (default: the chart's locale, else the browser's).
+            min_move: Smallest price step of a series (default 0.01).
+            **intl_options: Intl.NumberFormat options in snake_case or camelCase, e.g.
+                style="currency", currency="EUR", maximum_fraction_digits=0,
+                notation="compact".
+        """
+        spec = {"intl": "number", "options": _options(intl_options)}
+        if locale:
+            spec["locale"] = locale
+        if min_move is not None:
+            spec["minMove"] = min_move
+        return spec
+
+    @staticmethod
+    def date_format(locale=None, **intl_options):
+        """A date/time formatter built from JavaScript's Intl.DateTimeFormat options.
+
+        Use in W.localization(time_formatter=..., tick_formatters=...).
+
+        Args:
+            locale: e.g. "en-GB" (default: the chart's locale, else the browser's).
+            **intl_options: Intl.DateTimeFormat options in snake_case or camelCase, e.g.
+                weekday="short", day="numeric", month="short", year="2-digit",
+                hour="2-digit", minute="2-digit". Times are shown as given in the data
+                (wall-clock time); pass time_zone="America/New_York" only if your
+                times are real UTC.
+        """
+        spec = {"intl": "date", "options": _options(intl_options)}
+        if locale:
+            spec["locale"] = locale
+        return spec
+
+    @staticmethod
+    def localization(locale=None, date_format=None, price_formatter=None, time_formatter=None, tick_formatters=None):
+        """chart_options for number and date formatting.
+
+        Args:
+            locale: Locale for month names on the time axis and the default for
+                W.number_format()/W.date_format(), e.g. "de-DE".
+            date_format: Lightweight Charts date pattern for the crosshair label,
+                e.g. "dd MMM 'yy" or "yyyy-MM-dd".
+            price_formatter: W.number_format(...) for every price axis, in every pane
+                (oscillators and volume too). For one series only, pass the format
+                as that series' price_format instead.
+            time_formatter: W.date_format(...) for the crosshair's time label.
+            tick_formatters: W.date_format(...) per time-axis tick type, as a dict with
+                keys "year", "month", "day", "time" and "time_with_seconds". Tick types
+                left out use the built-in labels.
+        """
+        localization = _options({"locale": locale, "date_format": date_format})
+        if price_formatter is not None:
+            localization["priceFormatter"] = price_formatter
+        if time_formatter is not None:
+            localization["timeFormatter"] = time_formatter
+        result = {"localization": localization} if localization else {}
+        if tick_formatters:
+            types = {"year", "month", "day", "time", "time_with_seconds"}
+            unknown = set(tick_formatters) - types
+            if unknown:
+                raise ValueError(f"Unknown tick types {sorted(unknown)}. Use {sorted(types)}")
+            result["timeScale"] = {"tickMarkFormatter": dict(tick_formatters)}
+        return result
+
+    @staticmethod
+    def image_watermark(src, alpha=0.3, max_width=None, max_height=None, padding=0, pane=0):
+        """An image watermark for the `watermark=` argument (combine several in a list).
+
+        Args:
+            src: An image URL, a data: URI, a local file path or raw image bytes.
+                Local files and bytes are embedded in the notebook as a data: URI.
+            alpha: Opacity from 0 to 1.
+            max_width / max_height: Largest size in pixels (default: the image's own size,
+                shrunk to fit the pane).
+            padding: Minimum space in pixels between the image and the pane edges.
+            pane: Pane to draw it in.
+        """
+        import base64
+        import mimetypes
+
+        if isinstance(src, (bytes, bytearray)):
+            head = bytes(src[:100]).lstrip()
+            mime = "image/svg+xml" if head.startswith((b"<svg", b"<?xml")) else (
+                "image/jpeg" if head.startswith(b"\xff\xd8") else "image/png"
+            )
+            src = f"data:{mime};base64," + base64.b64encode(src).decode()
+        elif not str(src).startswith(("http://", "https://", "data:", "//")):
+            path = Path(src)
+            if not path.is_file():
+                raise FileNotFoundError(f"Image not found: {src}")
+            mime = mimetypes.guess_type(path.name)[0] or "image/png"
+            src = f"data:{mime};base64," + base64.b64encode(path.read_bytes()).decode()
+        return {
+            "image": str(src),
+            **_options({"alpha": alpha, "max_width": max_width, "max_height": max_height, "padding": padding}),
+            "pane": pane,
+        }
 
     @staticmethod
     def rows_in_range(df, time_range, time_column="date"):

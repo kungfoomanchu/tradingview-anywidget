@@ -63,12 +63,14 @@ def _(mo):
     Pick a few features at a time rather than all of them: each oscillator adds
     a pane, and several overlays on one price chart get hard to read. Click a
     name in the legend to hide or show that series, and use the buttons below
-    the chart to move it from Python.
+    the chart to move it from Python. Below the chart, the events reported back
+    to Python update as you hover, click and double-click.
 
-    Two features in the reference below don't fit on this chart: **comparing
+    Three features in the reference below don't fit on this chart: **comparing
     tickers** (section 5) rescales every ticker to % change, so it's a different
-    kind of chart, and **sparklines** (section 8) are several small charts side
-    by side.
+    kind of chart; **sparklines** (section 8) are several small charts side by
+    side; and **live data** (section 14) streams new bars into a chart, which
+    would leave this chart's indicators behind.
     """)
     return
 
@@ -112,9 +114,24 @@ def _(mo):
     )
     pg_signals = mo.ui.checkbox(value=False, label="Buy/sell markers (SMA 10/30 cross)")
     pg_levels = mo.ui.checkbox(value=False, label="Support / resistance lines")
-    pg_watermark = mo.ui.checkbox(value=True, label="Ticker watermark")
+    pg_watermark = mo.ui.dropdown(
+        options=["Off", "Ticker text", "Logo image", "Both"], value="Ticker text", label="Watermark"
+    )
     pg_grid = mo.ui.checkbox(value=True, label="Grid")
-    pg_crosshair = mo.ui.dropdown(options={"Normal": 0, "Magnet": 1, "Hidden": 2}, value="Normal", label="Crosshair")
+    pg_crosshair = mo.ui.dropdown(
+        options={"Normal": "normal", "Magnet (close)": "magnet", "Magnet (OHLC)": "magnet_ohlc", "Hidden": "hidden"},
+        value="Normal",
+        label="Crosshair",
+    )
+    pg_crosshair_style = mo.ui.dropdown(
+        options=["large_dashed", "dashed", "dotted", "solid"], value="large_dashed", label="Crosshair line"
+    )
+    pg_format = mo.ui.dropdown(
+        options=["Default", "US dollars", "Euros, German dates", "Compact numbers"],
+        value="Default",
+        label="Number and date format",
+    )
+    pg_pane_size = mo.ui.slider(start=0.2, stop=1.0, step=0.1, value=0.4, label="Lower pane size", show_value=True)
     pg_scale = mo.ui.dropdown(
         options={"Normal": "normal", "Logarithmic": "log", "Percentage": "percentage", "Indexed to 100": "indexed"},
         value="Normal",
@@ -137,10 +154,11 @@ def _(mo):
             [
                 panel_row("Data", ticker_input, period_dropdown, theme_dropdown, pg_chart_type),
                 panel_row("On the price", pg_volume, pg_sma, pg_ema, pg_overlay),
-                panel_row("Below the price", pg_oscillators),
+                panel_row("Below the price", pg_oscillators, pg_pane_size),
                 panel_row("Annotations", pg_signals, pg_levels, pg_watermark),
                 panel_row("Line style", pg_line_type, pg_points, pg_ma_style),
-                panel_row("Chart options", pg_grid, pg_crosshair, pg_scale),
+                panel_row("Chart options", pg_grid, pg_crosshair, pg_crosshair_style, pg_scale),
+                panel_row("Formatting", pg_format),
                 panel_row("Time axis", pg_bar_spacing, pg_right_offset, pg_wheel),
             ],
             gap=0.75,
@@ -151,14 +169,17 @@ def _(mo):
         period_dropdown,
         pg_chart_type,
         pg_crosshair,
+        pg_crosshair_style,
         pg_bar_spacing,
         pg_ema,
+        pg_format,
         pg_grid,
         pg_levels,
         pg_line_type,
         pg_ma_style,
         pg_oscillators,
         pg_overlay,
+        pg_pane_size,
         pg_points,
         pg_right_offset,
         pg_scale,
@@ -177,17 +198,21 @@ def _(
     W,
     crossover_markers,
     df,
+    logo_svg,
     mo,
     pg_bar_spacing,
     pg_chart_type,
     pg_crosshair,
+    pg_crosshair_style,
     pg_ema,
+    pg_format,
     pg_grid,
     pg_levels,
     pg_line_type,
     pg_ma_style,
     pg_oscillators,
     pg_overlay,
+    pg_pane_size,
     pg_points,
     pg_right_offset,
     pg_scale,
@@ -217,8 +242,8 @@ def _(
     if pg_levels.value:
         top, bottom = float(df["High"].max()), float(df["Low"].min())
         main_series["price_lines"] = [
-            W.price_line(top, color="#26a69a", title="Resistance"),
-            W.price_line(bottom, color="#ef5350", title="Support"),
+            W.price_line(top, color="#26a69a", title="Resistance", id="resistance"),
+            W.price_line(bottom, color="#ef5350", title="Support", id="support"),
         ]
     pg_series = [main_series]
 
@@ -261,22 +286,55 @@ def _(
         pg_series += pg_oscillator_builders[oscillator](next_pane)
         next_pane += 1
 
+    # (chart_options, the price series' price format): currency goes on the price
+    # series only, so oscillator panes keep plain numbers
+    pg_formats = {
+        "Default": ({}, None),
+        "US dollars": (
+            W.localization(
+                locale="en-US",
+                time_formatter=W.date_format(weekday="short", month="short", day="numeric", year="numeric"),
+            ),
+            W.number_format(style="currency", currency="USD"),
+        ),
+        "Euros, German dates": (
+            W.localization(
+                locale="de-DE",
+                time_formatter=W.date_format(day="2-digit", month="2-digit", year="numeric"),
+                tick_formatters={"day": W.date_format(day="numeric", month="numeric")},
+            ),
+            W.number_format(style="currency", currency="EUR"),
+        ),
+        "Compact numbers": ({}, W.number_format(notation="compact", maximum_significant_digits=4)),
+    }
+    pg_format_options, pg_price_format = pg_formats[pg_format.value]
+    if pg_price_format:
+        main_series["options"]["priceFormat"] = pg_price_format
+    pg_text_mark = {"text": ticker, "color": "rgba(128, 128, 128, 0.15)", "fontSize": 64}
+    pg_logo_mark = W.image_watermark(logo_svg, alpha=0.12, max_height=140, padding=20)
+    pg_watermarks = {
+        "Off": [],
+        "Ticker text": [pg_text_mark],
+        "Logo image": [pg_logo_mark],
+        "Both": [{**pg_text_mark, "vertAlign": "top"}, pg_logo_mark],
+    }
     pg_grid_color = theme["grid"]["vertLines"]["color"] if pg_grid.value else "transparent"
     pg_widget = W(
         series_data=pg_series,
         chart_options=W.merge_options(
             theme,
-            {
-                "grid": {"vertLines": {"color": pg_grid_color}, "horzLines": {"color": pg_grid_color}},
-                "crosshair": {"mode": pg_crosshair.value},
-            },
+            {"grid": {"vertLines": {"color": pg_grid_color}, "horzLines": {"color": pg_grid_color}}},
+            W.crosshair(mode=pg_crosshair.value, style=pg_crosshair_style.value),
             W.time_scale(bar_spacing=pg_bar_spacing.value, right_offset=pg_right_offset.value),
             W.interaction(mouse_wheel=pg_wheel.value),
+            pg_format_options,
         ),
-        watermark={"text": ticker, "color": "rgba(128, 128, 128, 0.15)", "fontSize": 64} if pg_watermark.value else {},
+        watermark=pg_watermarks[pg_watermark.value],
+        # Main pane 1, every pane below it pg_pane_size
+        pane_heights=[1] + [pg_pane_size.value] * (next_pane - 1),
         # Keep the bar spacing picked above instead of fitting every bar on screen
         fit_content=False,
-        height=460 + 140 * (next_pane - 1),
+        height=460 + int(350 * pg_pane_size.value) * (next_pane - 1),
     )
     playground = mo.ui.anywidget(pg_widget)
     playground
@@ -304,7 +362,9 @@ def _(mo, pg_widget):
 def _(mo, playground):
     mo.md(f"""
     **Crosshair:** {describe_event(playground.value.get("crosshair_data", {}), "hover over the chart")}<br>
+    **Mouse at:** {describe_pointer(playground.value.get("crosshair_data", {}))}<br>
     **Last click:** {describe_event(playground.value.get("clicked_data", {}), "click on the chart")}<br>
+    **Last double-click:** {describe_event(playground.value.get("double_clicked_data", {}), "double-click on the chart")}<br>
     **On screen:** {describe_visible_bars(playground.value.get("visible_bars", {}))}
     """)
     return
@@ -354,6 +414,17 @@ def _(mo, yf):
     return (load_prices,)
 
 
+@app.cell(hide_code=True)
+def _():
+    # A small logo for the image watermark examples (any URL, file path or image bytes works)
+    logo_svg = b"""<svg xmlns="http://www.w3.org/2000/svg" width="240" height="160" viewBox="0 0 240 160">
+      <polyline points="10,140 70,90 110,110 170,40 230,60" fill="none" stroke="#2962FF" stroke-width="14"
+        stroke-linecap="round" stroke-linejoin="round"/>
+      <circle cx="170" cy="40" r="16" fill="#FF6D00"/>
+    </svg>"""
+    return (logo_svg,)
+
+
 @app.cell
 def _(W, load_prices, period_dropdown, theme_dropdown, ticker_input):
     ticker = ticker_input.value.strip().upper()
@@ -382,8 +453,16 @@ def _(mo):
     by whether the bar closed up or down. It sits in the bottom 20% of the price
     pane on its own hidden scale, so it doesn't distort the price axis.
 
-    `watermark=` puts large faint text behind the chart: pass `text`, and
-    optionally `color`, `fontSize`, `horzAlign` and `vertAlign`.
+    `watermark=` puts large faint text or an image behind the chart:
+
+    - **Text:** `{"text": "AAPL"}`, optionally with `color`, `fontSize`,
+      `horzAlign` (`"left"`, `"center"`, `"right"`) and `vertAlign` (`"top"`,
+      `"center"`, `"bottom"`).
+    - **Image:** `W.image_watermark(src, alpha=0.3, max_width=, max_height=, padding=0)`.
+      `src` is an image URL, a local file path or image bytes (files and bytes
+      are embedded in the notebook).
+    - Pass a **list** for several watermarks, and add `"pane": n` to one (or
+      `pane=n` to `W.image_watermark`) to put it in a lower pane.
     """)
     return
 
@@ -396,12 +475,13 @@ def _(mo):
         label="Chart type",
     )
     show_volume = mo.ui.checkbox(value=True, label="Show volume")
-    mo.hstack([chart_type, show_volume], justify="start", gap=1)
-    return chart_type, show_volume
+    watermark_kind = mo.ui.dropdown(options=["Text", "Image", "Text and image"], value="Text", label="Watermark")
+    mo.hstack([chart_type, show_volume, watermark_kind], justify="start", gap=1)
+    return chart_type, show_volume, watermark_kind
 
 
 @app.cell
-def _(W, chart_type, df, mo, show_volume, theme, ticker):
+def _(W, chart_type, df, logo_svg, mo, show_volume, theme, ticker, watermark_kind):
     builders = {
         "Candlestick": lambda: W.candlestick(df),
         "Bar": lambda: W.bar(df),
@@ -411,11 +491,17 @@ def _(W, chart_type, df, mo, show_volume, theme, ticker):
         "Baseline": lambda: W.baseline(df, base_value=float(df["Close"].mean())),
         "Histogram": lambda: W.histogram(df),
     }
+    text_mark = {"text": ticker, "color": "rgba(128, 128, 128, 0.15)", "fontSize": 64}
+    logo_mark = W.image_watermark(logo_svg, alpha=0.15, max_height=150)
     mo.ui.anywidget(
         W(
             series_data=[builders[chart_type.value]()] + ([W.volume(df)] if show_volume.value else []),
             chart_options=theme,
-            watermark={"text": ticker, "color": "rgba(128, 128, 128, 0.15)", "fontSize": 64},
+            watermark={
+                "Text": [text_mark],
+                "Image": [logo_mark],
+                "Text and image": [{**text_mark, "vertAlign": "top"}, logo_mark],
+            }[watermark_kind.value],
             height=450,
         )
     )
@@ -477,6 +563,9 @@ def _(mo):
     - `time` must match the time of a bar in that series exactly, otherwise
       the marker is silently dropped. Taking times from the series' own `data`,
       as below, guarantees a match.
+    - `id=` (optional) names the marker: while the mouse is over it, events
+      report it as `hovered_object_id` (section 7, and the playground's
+      "Mouse at" line).
 
     This example marks a **buy** where the 10-day SMA crosses above the 30-day
     SMA (a "golden cross") and a **sell** where it crosses below.
@@ -496,9 +585,9 @@ def _(W):
                 continue
             diff = point["value"] - slow_by_time[point["time"]]
             if prev_diff is not None and prev_diff <= 0 < diff:
-                markers.append(W.marker(point["time"], "belowBar", "arrowUp", "#26a69a", "Buy"))
+                markers.append(W.marker(point["time"], "belowBar", "arrowUp", "#26a69a", "Buy", id=f"Buy {point['time']}"))
             elif prev_diff is not None and prev_diff >= 0 > diff:
-                markers.append(W.marker(point["time"], "aboveBar", "arrowDown", "#ef5350", "Sell"))
+                markers.append(W.marker(point["time"], "aboveBar", "arrowDown", "#ef5350", "Sell", id=f"Sell {point['time']}"))
             prev_diff = diff
         return markers
 
@@ -534,9 +623,9 @@ def _(mo):
     `W.price_line(price, color, line_width, line_style, title)` and attach a
     list of them to a series under `"price_lines"`.
 
-    `line_style` is `0` solid, `1` dotted, `2` dashed (default), `3` large
-    dashes, `4` sparse dots. Here the lines mark the period's high, low and
-    midpoint.
+    `line_style` is `"solid"`, `"dotted"`, `"dashed"` (default),
+    `"large_dashed"` or `"sparse_dotted"` (or `0`-`4`). `id=` works as for
+    markers. Here the lines mark the period's high, low and midpoint.
     """)
     return
 
@@ -554,7 +643,7 @@ def _(W, df, mo, theme):
                     "price_lines": [
                         W.price_line(period_high, color="#26a69a", title="Resistance"),
                         W.price_line(period_low, color="#ef5350", title="Support"),
-                        W.price_line((period_high + period_low) / 2, color="#787B86", title="Mid", line_style=1),
+                        W.price_line((period_high + period_low) / 2, color="#787B86", title="Mid", line_style="dotted"),
                     ],
                 },
                 W.volume(df),
@@ -617,7 +706,8 @@ def _(mo):
     as a nested dict. A few useful ones:
 
     - `"crosshair": {"mode": ...}`: `0` follows the mouse freely, `1` snaps to
-      the closing price (magnet), `2` hides the crosshair.
+      the closing price (magnet), `2` hides the crosshair, `3` snaps to the
+      nearest open/high/low/close. `W.crosshair()` (section 12) styles it too.
     - `"rightPriceScale": {"mode": ...}`: `0` normal, `1` logarithmic (good for
       long periods of growth), `2` % change, `3` indexed to 100.
     - `"grid"`: grid line colors.
@@ -684,8 +774,15 @@ def _(mo):
 
     - `crosshair_data`: the bar under the mouse, as `{"time", "series_values", "x", "y"}`.
       `series_values` has one entry per series under the crosshair
-      (`open`/`high`/`low`/`close` for candles, `value` for lines).
-    - `clicked_data`: the same, for the last bar clicked.
+      (`open`/`high`/`low`/`close` for candles, `value` for lines). It also has
+      `price` (the price at the mouse, on the scale of the first series in
+      that pane), `logical` (the bar index), `pane`, and when the mouse is over
+      a series, marker or price line: `hovered_series` (its index in
+      `series_data`), `hovered_type` (`"marker"`, `"price-line"`,
+      `"series-point"`, ...) and `hovered_object_id` (the marker's or line's `id`).
+    - `clicked_data` / `double_clicked_data`: the same, for the last bar
+      clicked or double-clicked. Clicking at a price, e.g. to add a price line
+      there, is `clicked_data["price"]`.
     - `visible_range`: the `{"from", "to"}` times currently on screen, updated
       after scrolling or zooming. Setting it from Python scrolls the chart.
     - `logical_range`: the same range as bar indices (`0` is the first bar;
@@ -732,6 +829,19 @@ def describe_event(event, empty_text):
 
 
 @app.function
+def describe_pointer(event):
+    """Price, pane and hovered object of a crosshair event."""
+    if "price" not in event:
+        return "hover over the chart"
+    text = f"price **{event['price']:.2f}** in pane {event.get('pane', 0)}"
+    if "hovered_object_id" in event:
+        text += f" · over {event.get('hovered_type', 'object')} `{event['hovered_object_id']}`"
+    elif "hovered_series" in event:
+        text += f" · over series {event['hovered_series']}"
+    return text
+
+
+@app.function
 def describe_visible_bars(bars):
     """One-line summary of a visible_bars event."""
     if not bars:
@@ -751,7 +861,9 @@ def _(W, df, events_chart, mo):
     mo.md(
         f"""
         - **Crosshair:** {describe_event(events_chart.value.get("crosshair_data", {}), "move your mouse over the chart")}
+        - **Mouse at:** {describe_pointer(events_chart.value.get("crosshair_data", {}))}
         - **Last click:** {describe_event(events_chart.value.get("clicked_data", {}), "click on the chart")}
+        - **Last double-click:** {describe_event(events_chart.value.get("double_clicked_data", {}), "double-click on the chart")}
         - **Visible range:** {visible.get("from", "?")} → {visible.get("to", "?")}
         - **Visible bars:** {describe_visible_bars(events_chart.value.get("visible_bars", {}))}
         - **Logical range:** bars {logical.get("from", 0):.1f} → {logical.get("to", 0):.1f}
@@ -979,6 +1091,231 @@ def _(mo, nav_chart):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
+    ## 12. Crosshair styling
+
+    `W.crosshair(mode=, color=, width=, style=, labels=, vert_line=, horz_line=)`
+    returns `{"crosshair": {...}}` for `chart_options`:
+
+    - `mode`: `"normal"` follows the mouse, `"magnet"` snaps to the close,
+      `"magnet_ohlc"` snaps to the nearest open, high, low or close, and
+      `"hidden"` turns the crosshair off.
+    - `color`, `width` (pixels) and `style` (`"solid"`, `"dotted"`, `"dashed"`,
+      `"large_dashed"`, `"sparse_dotted"`) style both lines; `labels=False`
+      hides their labels on the axes.
+    - `vert_line=` / `horz_line=` override one line, e.g.
+      `vert_line={"visible": False}` or `horz_line={"label_background_color": "#2962FF"}`.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    crosshair_style_mode = mo.ui.dropdown(
+        options=["normal", "magnet", "magnet_ohlc", "hidden"], value="magnet_ohlc", label="Mode"
+    )
+    crosshair_line_style = mo.ui.dropdown(
+        options=["solid", "dotted", "dashed", "large_dashed", "sparse_dotted"], value="dotted", label="Line style"
+    )
+    crosshair_color = mo.ui.text(value="#FF6D00", label="Color")
+    crosshair_vertical = mo.ui.checkbox(value=True, label="Vertical line")
+    crosshair_labels = mo.ui.checkbox(value=True, label="Axis labels")
+    mo.hstack(
+        [crosshair_style_mode, crosshair_line_style, crosshair_color, crosshair_vertical, crosshair_labels],
+        justify="start", gap=1, wrap=True,
+    )
+    return crosshair_color, crosshair_labels, crosshair_line_style, crosshair_style_mode, crosshair_vertical
+
+
+@app.cell
+def _(
+    W,
+    crosshair_color,
+    crosshair_labels,
+    crosshair_line_style,
+    crosshair_style_mode,
+    crosshair_vertical,
+    df,
+    mo,
+    theme,
+):
+    mo.ui.anywidget(
+        W(
+            series_data=[W.candlestick(df.tail(80))],
+            chart_options=W.merge_options(
+                theme,
+                W.crosshair(
+                    mode=crosshair_style_mode.value,
+                    color=crosshair_color.value,
+                    width=1,
+                    style=crosshair_line_style.value,
+                    labels=crosshair_labels.value,
+                    vert_line={"visible": crosshair_vertical.value},
+                    horz_line={"label_background_color": crosshair_color.value},
+                ),
+            ),
+            height=350,
+        )
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## 13. Number and date formatting
+
+    Lightweight Charts formats prices and dates with JavaScript functions,
+    which can't be sent from Python. Instead, describe the format and the
+    chart builds the function with the browser's
+    [Intl](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Intl)
+    formatters:
+
+    - `W.number_format(locale=None, min_move=None, **options)` takes
+      [Intl.NumberFormat options](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Intl/NumberFormat/NumberFormat#options),
+      e.g. `style="currency", currency="EUR"` or `notation="compact"`.
+    - `W.date_format(locale=None, **options)` takes
+      [Intl.DateTimeFormat options](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Intl/DateTimeFormat/DateTimeFormat#options),
+      e.g. `weekday="short", day="numeric", month="short"`.
+
+    Use them in `W.localization(locale=, date_format=, price_formatter=, time_formatter=, tick_formatters=)`,
+    which returns `chart_options`:
+
+    - `locale` alone (e.g. `"de-DE"`) switches the time axis to German month
+      names. Prices keep their default format.
+    - `price_formatter` formats every price axis on the chart, in every pane
+      (an RSI pane would also show `€`), plus the crosshair label and legend.
+      It suits single-pane charts.
+    - `time_formatter` formats the time label under the crosshair.
+    - `tick_formatters` formats the time-axis labels, per kind of tick:
+      `{"year": ..., "month": ..., "day": ..., "time": ..., "time_with_seconds": ...}`.
+      Kinds left out keep the built-in labels.
+
+    For **one series only**, pass the number format as its price format:
+    `W.candlestick(df, price_format=W.number_format(style="currency", currency="EUR"))`.
+    That's what the example below does, so the volume keeps its short format
+    (`14.5M`).
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    format_locale = mo.ui.dropdown(
+        options={"English (US)": ("en-US", "USD"), "German": ("de-DE", "EUR"), "Japanese": ("ja-JP", "JPY"),
+                 "French": ("fr-FR", "EUR")},
+        value="German",
+        label="Locale",
+    )
+    format_currency = mo.ui.checkbox(value=True, label="Prices as currency")
+    format_dates = mo.ui.checkbox(value=True, label="Long crosshair date")
+    mo.hstack([format_locale, format_currency, format_dates], justify="start", gap=1)
+    return format_currency, format_dates, format_locale
+
+
+@app.cell
+def _(W, df, format_currency, format_dates, format_locale, mo, theme):
+    locale, currency = format_locale.value
+    mo.ui.anywidget(
+        W(
+            series_data=[
+                W.candlestick(
+                    df, price_format=W.number_format(style="currency", currency=currency) if format_currency.value else None
+                ),
+                W.volume(df),
+            ],
+            chart_options=W.merge_options(
+                theme,
+                W.localization(
+                    locale=locale,
+                    time_formatter=(
+                        W.date_format(weekday="long", day="numeric", month="long", year="numeric")
+                        if format_dates.value else None
+                    ),
+                    tick_formatters={"month": W.date_format(month="long")},
+                ),
+            ),
+            height=400,
+        )
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## 14. Live data
+
+    `chart.update(point, series=0)` adds a new bar, or replaces the latest one,
+    without redrawing the chart: the view, zoom and hidden series stay as they
+    are. A point with the same time as the latest bar replaces it (a price
+    moving within the day); a later time adds a bar. Older times are ignored.
+
+    - `point` is one data point, like the ones in `series_data`:
+      `{"time", "open", "high", "low", "close"}` or `{"time", "value"}`. `time`
+      can be a `date`/`datetime`; it's converted to the series' time format.
+    - `series` is the index in `series_data`, so a volume series is updated
+      with its own call.
+    - `series_data` is updated in place, so Python always has the latest bar.
+
+    Below, `mo.ui.refresh` reruns a cell on a timer, and each run moves the
+    price a little, sometimes starting the next day's bar. Pick an interval to
+    start streaming. Indicators (SMA, RSI, ...) aren't recomputed by `update()`;
+    to keep them in step, update their series too, or redraw the chart.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    live_stream = mo.ui.refresh(options=["0.5s", "1s", "2s"], label="Stream a price every")
+    live_stream
+    return (live_stream,)
+
+
+@app.cell
+def _(W, df, mo, theme):
+    live_chart = W(
+        series_data=[W.candlestick(df.tail(60)), W.volume(df.tail(60))],
+        chart_options=W.merge_options(theme, W.time_scale(right_offset=3)),
+        height=350,
+    )
+    mo.ui.anywidget(live_chart)
+    return (live_chart,)
+
+
+@app.cell
+def _(live_chart, live_stream):
+    import datetime as _dt
+    import random as _random
+
+    live_stream  # rerun on every refresh tick
+
+    _last = live_chart.series_data[0]["data"][-1]
+    _last_volume = live_chart.series_data[1]["data"][-1]
+    _price = round(_last["close"] * (1 + _random.gauss(0, 0.004)), 2)
+    if _random.random() < 0.25:
+        # Start the next weekday's bar
+        _day = _dt.date.fromisoformat(_last["time"]) + _dt.timedelta(days=1)
+        while _day.weekday() >= 5:
+            _day += _dt.timedelta(days=1)
+        _open, _high, _low, _volume = _last["close"], max(_last["close"], _price), min(_last["close"], _price), 0
+    else:
+        # Move the latest bar
+        _day = _last["time"]
+        _open, _high, _low, _volume = _last["open"], max(_last["high"], _price), min(_last["low"], _price), _last_volume["value"]
+    _volume += _random.randint(200_000, 2_000_000)
+
+    live_chart.update({"time": _day, "open": _open, "high": _high, "low": _low, "close": _price})
+    live_chart.update(
+        {"time": _day, "value": _volume, "color": "rgba(38,166,154,0.5)" if _price >= _open else "rgba(239,83,80,0.5)"},
+        series=1,
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
     # Technical indicators with pandas-ta
 
     The `pta_` helpers compute indicators with
@@ -987,7 +1324,7 @@ def _(mo):
     same scale as the price are drawn **on the price chart**; the rest
     (oscillators) get **their own pane** below it.
 
-    ## 12. Overlays on the price chart
+    ## 15. Overlays on the price chart
 
     - `W.pta_bbands(df, length=20, std=2.0)`, **Bollinger Bands**: a moving
       average with bands `std` standard deviations above and below. Wide bands
@@ -1036,12 +1373,13 @@ def _(W, df, mo, overlay_dropdown, theme):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ## 13. Oscillators in panes
+    ## 16. Oscillators in panes
 
     Each oscillator helper puts its series in pane `1` (just below the price) by
     default. To stack several, give each a different `pane=`, as this example
-    does. Panes below the price start at about 40% of its height; drag the
-    separators to resize them.
+    does. Panes below the price start at 40% of its height; drag the
+    separators to resize them, or set `pane_heights=` on the widget: relative
+    sizes from the top pane down, e.g. `pane_heights=[3, 1, 1]`.
 
     - `W.pta_rsi(df, length=14)`, **RSI**: momentum from 0 to 100, with dashed
       lines at 70 (overbought) and 30 (oversold).
@@ -1070,12 +1408,13 @@ def _(mo):
         label="Oscillators",
     )
     rsi_length = mo.ui.slider(start=5, stop=50, value=14, label="RSI length")
-    mo.hstack([oscillator_select, rsi_length], justify="start", gap=2)
-    return oscillator_select, rsi_length
+    oscillator_height = mo.ui.slider(start=0.2, stop=1.0, step=0.1, value=0.4, label="Oscillator pane size", show_value=True)
+    mo.hstack([oscillator_select, rsi_length, oscillator_height], justify="start", gap=2)
+    return oscillator_height, oscillator_select, rsi_length
 
 
 @app.cell
-def _(W, df, mo, oscillator_select, rsi_length, theme):
+def _(W, df, mo, oscillator_height, oscillator_select, rsi_length, theme):
     oscillators = {
         "RSI": lambda pane: [W.pta_rsi(df, length=rsi_length.value, pane=pane)],
         "MACD": lambda pane: W.pta_macd(df, pane=pane),
@@ -1092,7 +1431,8 @@ def _(W, df, mo, oscillator_select, rsi_length, theme):
         W(
             series_data=oscillator_series,
             chart_options=theme,
-            height=350 + 130 * len(oscillator_select.value),
+            pane_heights=[1] + [oscillator_height.value] * len(oscillator_select.value),
+            height=350 + int(330 * oscillator_height.value) * len(oscillator_select.value),
         )
     )
     return
@@ -1101,7 +1441,7 @@ def _(W, df, mo, oscillator_select, rsi_length, theme):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ## 14. Any pandas-ta indicator
+    ## 17. Any pandas-ta indicator
 
     `W.pta(df, "name", **kwargs)` runs **any** of pandas-ta's 200+ indicators by
     name and returns a list of series, one per output column. Keyword arguments

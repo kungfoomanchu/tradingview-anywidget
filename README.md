@@ -78,19 +78,33 @@ chart_options=W.merge_options(
     W.theme("dark"),
     W.time_scale(bar_spacing=10, right_offset=5, fix_left_edge=True),
     W.interaction(mouse_wheel=False),  # leave the mouse wheel to the page
+    W.crosshair(mode="magnet_ohlc", style="dotted"),
+    W.localization(locale="de-DE", time_formatter=W.date_format(day="2-digit", month="long")),
 )
 ```
 
 A series with `price_scale_id="left"` shows the left price axis automatically.
 Intraday data shows the time of day on the time axis automatically.
 
+Formatters are JavaScript functions in Lightweight Charts, so they are described
+with [Intl](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Intl)
+options instead: `W.number_format(style="currency", currency="EUR")` (per series as
+`price_format=`, or chart-wide in `W.localization(price_formatter=...)`) and
+`W.date_format(...)` for the crosshair time label and time-axis ticks.
+
+Other widget arguments: `watermark=` takes `{"text": ...}`, `W.image_watermark(path_or_url)`
+or a list of them, and `pane_heights=[3, 1, 1]` sets relative pane heights.
+
 ### Events
 
-`crosshair_data`, `clicked_data`, `visible_range`, `logical_range` and
-`visible_bars` are synced back to Python (`chart.value["crosshair_data"]` in
-marimo). Crosshair updates are throttled to 10 per second and range updates are
-sent once scrolling stops. `W.rows_in_range(df, chart.value["visible_range"])`
-returns the rows on screen.
+`crosshair_data`, `clicked_data`, `double_clicked_data`, `visible_range`,
+`logical_range` and `visible_bars` are synced back to Python
+(`chart.value["crosshair_data"]` in marimo). Crosshair and click events include
+the bar's values, the `price` and bar index (`logical`) under the mouse, the
+`pane`, and the series, marker or price line under the mouse (`hovered_series`,
+`hovered_type`, `hovered_object_id` = the marker's `id=`). Crosshair updates are
+throttled to 10 per second and range updates are sent once scrolling stops.
+`W.rows_in_range(df, chart.value["visible_range"])` returns the rows on screen.
 
 ### Moving the chart from Python
 
@@ -105,9 +119,11 @@ chart.show_all()                  # fit every bar
 chart.scroll_to_real_time()       # jump to the latest bar
 chart.scroll_to_position(-50)     # latest bar 50 bars past the right edge
 chart.logical_range = {"from": len(df) - 50, "to": len(df) - 1}  # last 50 bars
+chart.update({"time": "2024-06-03", "open": 1, "high": 2, "low": 1, "close": 2})  # live data
 ```
 
-Click a name in the legend to hide or show that series.
+`chart.update(point, series=0)` adds a bar or replaces the latest one without
+redrawing the chart. Click a name in the legend to hide or show that series.
 
 ## Lightweight Charts API Coverage
 
@@ -118,34 +134,37 @@ Click a name in the legend to hide or show that series.
 | Category | Wrapped | Available | Coverage |
 |----------|---------|-----------|----------|
 | Series Types | 6 | 6 | **100%** |
-| Chart Methods | ~8 | 15+ | ~50% |
-| Series Methods | ~6 | 20+ | ~30% |
+| Chart Methods | ~10 | 15+ | ~65% |
+| Series Methods | ~8 | 20+ | ~40% |
 | Time Scale | ~10 | 15+ | ~65% |
 | Price Scale | 5 | 6 | ~85% |
-| Pane API | 3 | 15+ | ~20% |
-| Events | 4 | 5+ | ~80% |
-| Chart Options | 8 groups | 20+ | ~40% |
-| Series Options | ~25 | 60+ | ~40% |
-| Plugins | 2 | 4+ | ~50% |
+| Pane API | 4 | 15+ | ~25% |
+| Events | 5 | 5+ | ~95% |
+| Chart Options | 10 groups | 20+ | ~55% |
+| Series Options | ~30 | 60+ | ~50% |
+| Plugins | 3 | 4+ | ~75% |
 
-**Overall: ~40%** of the lightweight-charts v5 API surface (v5.2).
+**Overall: ~50%** of the lightweight-charts v5 API surface (v5.2).
 
 ### What IS wrapped
 
 - **All 6 series types**: Candlestick, Line, Area, Bar, Baseline, Histogram
 - **Chart creation**: `createChart()` with width/height/autoSize
 - **Dynamic updates**: `applyOptions()` for chart options, series add/remove/setData
-- **Panes**: series `pane` index (`addSeries(type, options, paneIndex)`), automatic pane sizing (`setStretchFactor`), per-pane legends
-- **Overlays**: Price lines, series markers (`createSeriesMarkers`), text watermark (`createTextWatermark`)
+- **Panes**: series `pane` index (`addSeries(type, options, paneIndex)`), pane sizing (`setStretchFactor`, automatic or via `pane_heights`), per-pane legends. Panes follow `series_data`, so removing, adding or reordering panes is done by changing series' `pane` indices rather than `removePane()`/`swapPanes()`.
+- **Overlays**: Price lines and series markers (`createSeriesMarkers`), both with optional `id`; text and image watermarks (`createTextWatermark`, `createImageWatermark` via `W.image_watermark()`), several per chart, in any pane
+- **Live data**: `series.update()` via `chart.update(point, series=0)`, which also keeps `series_data` in step
 - **Price scales**: per-series `priceScale` options (`mode` for log/percentage/indexed, `scaleMargins`, `invertScale`, `autoScale`, `borderVisible`) applied to that series' own pane only, built with `W.price_scale()`; left price scale shown automatically for series with `priceScaleId: "left"`; axis `visible` (chart-wide)
 - **Time scale**: `W.time_scale()` for `barSpacing`, `rightOffset`, `minBarSpacing`, `timeVisible`, `secondsVisible`, `fixLeftEdge`/`fixRightEdge`, `visible`, `borderVisible` (and any other option by name); `timeVisible`/`secondsVisible` set automatically for intraday data
 - **Scroll/zoom control**: `scrollToRealTime()`, `scrollToPosition()`, `fitContent()` as widget methods (`chart.scroll_to_real_time()`, `chart.scroll_to_position()`, `chart.show_all()`), `setVisibleLogicalRange()` via the bidirectional `logical_range` traitlet, fine-grained `handleScroll`/`handleScale` via `W.interaction()`
 - **Series data queries**: `barsInLogicalRange()` of the first series synced as `visible_bars` (first/last visible time, bars before/after); `W.rows_in_range()` filters the DataFrame to the visible range. (`data()`/`dataByIndex()` aren't wrapped: the data is already in Python, in `series_data`.)
 - **Series options**: snake_case names and named values for `lineStyle`, `lineType`, `lastPriceAnimation`; `visible` toggled by clicking the legend
-- **Events**: Crosshair move, click (with OHLC data), visible time range change and visible logical range change (both bidirectional)
-- **Basic chart options**: Layout (background, textColor), grid (line colors), crosshair mode (Normal/Magnet/Hidden), deep-merged with `W.merge_options()`
+- **Events**: Crosshair move, click and double-click (`subscribeDblClick`) with OHLC data, the price under the mouse (`coordinateToPrice()`), bar index (`logical`), pane, and hovered series/marker/price line (`hoveredSeries`, `hoveredObjectId`, `hoveredInfo`, v5.2); visible time range change and visible logical range change (both bidirectional)
+- **Crosshair**: `W.crosshair()` for mode (Normal/Magnet/Magnet OHLC/Hidden) and `vertLine`/`horzLine` color, width, style, visibility, labels
+- **Localization**: `W.localization()` for `locale`, `dateFormat`, `priceFormatter`, `timeFormatter` and the time scale's `tickMarkFormatter`; formatters (and per-series `priceFormat` `custom` formatters) are built in the browser from `Intl` options given with `W.number_format()` / `W.date_format()`
+- **Basic chart options**: Layout (background, textColor), grid (line colors), deep-merged with `W.merge_options()`
 - **Series titles**: every helper sets a `title`, shown in the legend
-- **Legend**: OHLC / series values with titles and colors, formatted with each series' price formatter
+- **Legend**: OHLC / series values with titles and colors, formatted like the price axis
 - **Python helpers**: SMA, EMA, volume overlay, dark/light themes (`W.theme()`), pandas/polars DataFrame conversion (daily and intraday)
 - **pandas-ta integration** (optional `pip install pandas-ta`):
   - Generic `W.pta(df, "indicator_name")` works with any of 200+ indicators
@@ -157,18 +176,21 @@ Click a name in the legend to hide or show that series.
 
 **High value (recommended next):**
 
-- **More pane control** - `removePane()`, `swapPanes()`, explicit pane heights (`setHeight()`)
-- **Coordinate conversions** - `priceToCoordinate()`, `coordinateToPrice()`, `timeToCoordinate()` (needed for custom overlays)
-- **More events** - `dblClick`, `subscribeDataChanged`, `subscribeSizeChange`, hovered series (`hoveredItem`, v5.2)
-- **Crosshair sub-options** - `vertLine`/`horzLine` colors, width, style, label visibility
-- **Localization** - locale, date/number formatting, time scale tick formatters (JS functions, so they need a declarative wrapper)
-- **Image watermarks** - `createImageWatermark()`
-- **Incremental updates** - `series.update()` for streaming bars without redrawing every series
+- **Screenshots** - `takeScreenshot()`, to save a chart as PNG from Python
+- **Programmatic crosshair** - `setCrosshairPosition()` / `clearCrosshairPosition()`, e.g. to sync the crosshair across several charts
+- **Whitespace and gaps** - time-only points to leave gaps or extend the time axis into the future
+- **Big data** - data conflation options (v5.2) and sending data in binary rather than JSON for very long series
+- **Other horizontal scales** - `createOptionsChart()` / `createYieldCurveChart()` for numeric x axes (option chains, yield curves)
+
+Deliberately not wrapped: `subscribeDataChanged` and `subscribeSizeChange` (the data
+and size come from Python, so Python already knows), `data()`/`dataByIndex()` (the
+data is in `series_data`), and coordinate conversions other than the price under the
+mouse (only useful for drawing custom overlays in JS).
 
 **Lower priority:**
 
 - **Custom series** - `addCustomSeries()` with `ICustomSeriesPaneView` (heatmaps, stacked areas, etc.)
-- **Series/pane primitives** - low-level drawing API for custom renderers
+- **Series/pane primitives** - low-level drawing API for custom renderers (drawing tools, trend lines), which would also need `priceToCoordinate()`/`timeToCoordinate()`
 - **Kinetic scroll** / tracking mode (mobile-specific)
 - **Advanced layout** - pane separators, attribution logo, color space
 
@@ -183,7 +205,7 @@ W(chart_options={
 })
 ```
 
-Features that **cannot** be accessed via passthrough (and require JS changes) include: method calls other than the wrapped ones (coordinate conversions, `series.update()`), JS function options (formatters) and pane methods other than placing series in panes.
+Features that **cannot** be accessed via passthrough (and require JS changes) include: method calls other than the wrapped ones (e.g. `takeScreenshot()`, `setCrosshairPosition()`), JS function options other than the `Intl`-based formatters and pane methods other than placing series in panes.
 
 ## Development
 

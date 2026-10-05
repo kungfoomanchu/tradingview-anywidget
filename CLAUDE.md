@@ -44,6 +44,8 @@ All DataFrame handling goes through `_time_values`, `_column_values`, `_line_poi
 ## Gotchas
 
 - Left/right price axis `visible` must be the same in every pane: Lightweight Charts lays all panes out from pane 0's setting, and a per-pane mismatch throws "Value is null" and blanks the chart. `chart.js` applies it chart-wide.
+- `localization.priceFormatter` replaces the format on every price axis in every pane (RSI, volume too), but `series.priceFormatter()` (used by the legend) ignores it; `chart.js` makes the legend follow it for plain price series. Prefer a per-series `price_format=W.number_format(...)` in examples.
+- Formatters can't cross the JSON boundary: Python sends `{"intl": "number"|"date", ...}` specs and `resolveChartOptions`/`resolveSeriesOptions` in `chart.js` build the functions.
 - In the demo, a `mo.ui.button` only runs its `on_click` if it's assigned to a variable (not created inline inside `mo.hstack`). Cells with buttons that call widget methods should depend on the widget object, not the `mo.ui.anywidget` wrapper, or they rerun on every mouse move.
 
 ## Verifying changes

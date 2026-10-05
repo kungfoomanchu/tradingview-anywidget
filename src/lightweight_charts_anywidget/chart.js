@@ -1,5 +1,6 @@
 import {
   createChart,
+  createImageWatermark,
   createTextWatermark,
   createSeriesMarkers,
   CandlestickSeries,
@@ -62,6 +63,64 @@ function debounce(fn, ms) {
   };
 }
 
+// --- Formatters: Python sends Intl options ({intl: "number" | "date", ...}) since
+// JSON can't carry functions; they're turned into formatter functions here ---
+
+const TICK_TYPES = ["year", "month", "day", "time", "time_with_seconds"]; // TickMarkType order
+
+function isFormatSpec(value) {
+  return value && typeof value === "object" && (value.intl === "number" || value.intl === "date");
+}
+
+// Lightweight Charts times: "YYYY-MM-DD", {year, month, day} or unix seconds
+function timeToDate(time) {
+  if (typeof time === "number") return new Date(time * 1000);
+  if (typeof time === "string") return new Date(`${time}T00:00:00Z`);
+  return new Date(Date.UTC(time.year, time.month - 1, time.day));
+}
+
+function makeFormatter(spec, chartLocale) {
+  const locale = spec.locale || chartLocale || undefined;
+  if (spec.intl === "number") {
+    const format = new Intl.NumberFormat(locale, spec.options || {});
+    return (value) => format.format(value);
+  }
+  // Times are wall-clock values stored as UTC, so format in UTC unless told otherwise
+  const format = new Intl.DateTimeFormat(locale, { timeZone: "UTC", ...(spec.options || {}) });
+  return (time) => format.format(timeToDate(time));
+}
+
+// chart_options with format specs replaced by formatter functions
+function resolveChartOptions(options) {
+  const resolved = { ...options };
+  const locale = options.localization?.locale;
+  if (options.localization) {
+    const localization = { ...options.localization };
+    for (const key of ["priceFormatter", "timeFormatter"]) {
+      if (isFormatSpec(localization[key])) localization[key] = makeFormatter(localization[key], locale);
+    }
+    resolved.localization = localization;
+  }
+  const ticks = options.timeScale?.tickMarkFormatter;
+  if (ticks && typeof ticks === "object") {
+    const byType = TICK_TYPES.map((name) => (isFormatSpec(ticks[name]) ? makeFormatter(ticks[name], locale) : null));
+    // Returning null falls back to the built-in label
+    const tickMarkFormatter = (time, type) => (byType[type] ? byType[type](time) : null);
+    resolved.timeScale = { ...options.timeScale, tickMarkFormatter };
+  }
+  return resolved;
+}
+
+// Series options with a format spec as priceFormat turned into a custom price format
+function resolveSeriesOptions(options, chartLocale) {
+  if (!isFormatSpec(options.priceFormat)) return options;
+  const spec = options.priceFormat;
+  return {
+    ...options,
+    priceFormat: { type: "custom", minMove: spec.minMove ?? 0.01, formatter: makeFormatter(spec, chartLocale) },
+  };
+}
+
 function seriesColor(series) {
   const o = series.options();
   return o.color || o.lineColor || o.topLineColor || o.upColor || "";
@@ -82,34 +141,53 @@ function render({ model, el }) {
 
   const chart = createChart(container, {
     autoSize: true,
-    ...(model.get("chart_options") || {}),
+    ...resolveChartOptions(model.get("chart_options") || {}),
   });
 
   // [{ series, config }] for every series currently on the chart
   let seriesList = [];
-  let watermarkInstance = null;
+  let watermarks = [];
   let legends = [];
 
+  // watermark is one dict or a list: {text, ...} for text, {image, ...} for an image
   function applyWatermark() {
-    if (watermarkInstance) {
-      watermarkInstance.detach();
-      watermarkInstance = null;
+    for (const watermark of watermarks) watermark.detach();
+    watermarks = [];
+    const value = model.get("watermark");
+    const panes = chart.panes();
+    for (const wm of Array.isArray(value) ? value : [value]) {
+      if (!wm || !(wm.text || wm.image)) continue;
+      const pane = panes[wm.pane || 0];
+      if (!pane) continue;
+      if (wm.image) {
+        const { image, pane: _, ...options } = wm;
+        watermarks.push(createImageWatermark(pane, image, options));
+        continue;
+      }
+      watermarks.push(
+        createTextWatermark(pane, {
+          horzAlign: wm.horzAlign || "center",
+          vertAlign: wm.vertAlign || "center",
+          lines: [
+            {
+              text: wm.text,
+              color: wm.color || "rgba(171, 71, 188, 0.3)",
+              fontSize: wm.fontSize || 48,
+              fontStyle: wm.fontStyle || "",
+              fontFamily: wm.fontFamily || "",
+            },
+          ],
+        }),
+      );
     }
-    const wm = model.get("watermark");
-    if (!wm || !wm.text) return;
+  }
 
-    watermarkInstance = createTextWatermark(chart.panes()[0], {
-      horzAlign: wm.horzAlign || "center",
-      vertAlign: wm.vertAlign || "center",
-      lines: [
-        {
-          text: wm.text,
-          color: wm.color || "rgba(171, 71, 188, 0.3)",
-          fontSize: wm.fontSize || 48,
-          fontStyle: wm.fontStyle || "",
-          fontFamily: wm.fontFamily || "",
-        },
-      ],
+  // pane_heights are relative sizes; without them, panes below the main one get 40% of its height
+  function applyPaneHeights() {
+    const heights = model.get("pane_heights") || [];
+    chart.panes().forEach((pane, i) => {
+      const height = heights[i] ?? (heights.length ? 1 : i === 0 ? 1 : SUB_PANE_STRETCH);
+      pane.setStretchFactor(height);
     });
   }
 
@@ -167,7 +245,9 @@ function render({ model, el }) {
       }
 
       // A pane index past the last pane creates a new pane
-      const series = chart.addSeries(SeriesType, config.options || {}, config.pane || 0);
+      const locale = (model.get("chart_options") || {}).localization?.locale;
+      const options = resolveSeriesOptions(config.options || {}, locale);
+      const series = chart.addSeries(SeriesType, options, config.pane || 0);
       if (config.data && config.data.length > 0) {
         series.setData(config.data);
       }
@@ -205,8 +285,7 @@ function render({ model, el }) {
     }
     applyAutoTimeScale();
 
-    const panes = chart.panes();
-    panes.forEach((pane, i) => pane.setStretchFactor(i === 0 ? 1 : SUB_PANE_STRETCH));
+    applyPaneHeights();
 
     if (model.get("fit_content")) {
       chart.timeScale().fitContent();
@@ -219,7 +298,11 @@ function render({ model, el }) {
   // --- Legend: one per pane, showing hovered (or latest) values ---
 
   function legendItem(series, config, data, isMain) {
-    const fmt = (v) => series.priceFormatter().format(v);
+    // Match the price axis: a chart-wide priceFormatter replaces the default price
+    // format (but not volume, percent or custom formats) on the axis, so use it here too
+    const chartFormatter = chart.options().localization.priceFormatter;
+    const plain = (series.options().priceFormat?.type ?? "price") === "price";
+    const fmt = (v) => (chartFormatter && plain ? chartFormatter(v) : series.priceFormatter().format(v));
     const item = document.createElement("span");
     item.className = "lwc-legend-item";
     const visible = series.options().visible !== false;
@@ -309,10 +392,23 @@ function render({ model, el }) {
       const values = param.seriesData.get(series);
       if (values) data.series_values.push({ ...values });
     }
+    if (param.logical !== undefined) data.logical = param.logical;
+    if (param.paneIndex !== undefined) data.pane = param.paneIndex;
     if (param.point) {
       data.x = param.point.x;
       data.y = param.point.y;
+      // Price under the mouse, on the scale of the first series in that pane
+      const first = seriesList.find(({ series }) => series.getPane().paneIndex() === (param.paneIndex ?? 0));
+      const price = first ? first.series.coordinateToPrice(param.point.y) : null;
+      if (price !== null) data.price = price;
     }
+    // The series, marker or price line under the mouse (markers/lines report their id)
+    if (param.hoveredSeries) {
+      const index = seriesList.findIndex(({ series }) => series === param.hoveredSeries);
+      if (index >= 0) data.hovered_series = index;
+    }
+    if (param.hoveredObjectId !== undefined) data.hovered_object_id = param.hoveredObjectId;
+    if (param.hoveredInfo?.type) data.hovered_type = param.hoveredInfo.type;
     return data;
   }
 
@@ -331,6 +427,12 @@ function render({ model, el }) {
   chart.subscribeClick((param) => {
     if (param.time === undefined) return;
     model.set("clicked_data", eventPayload(param));
+    model.save_changes();
+  });
+
+  chart.subscribeDblClick((param) => {
+    if (param.time === undefined) return;
+    model.set("double_clicked_data", eventPayload(param));
     model.save_changes();
   });
 
@@ -376,6 +478,27 @@ function render({ model, el }) {
     if (msg.command === "scrollToRealTime") timeScale.scrollToRealTime();
     else if (msg.command === "scrollToPosition") timeScale.scrollToPosition(msg.position, !!msg.animated);
     else if (msg.command === "fitContent") timeScale.fitContent();
+    else if (msg.command === "update") updatePoint(msg.series, msg.point);
+  }
+
+  // Live data: add or replace the latest bar of one series without redrawing the chart
+  function updatePoint(index, point) {
+    const entry = seriesList[index];
+    if (!entry) return;
+    try {
+      entry.series.update(point);
+    } catch (error) {
+      console.warn("Can't update the chart with an older bar", point, error);
+      return;
+    }
+    // Keep the synced series_data in step, so a chart redrawn later still has the bar
+    // (every open view runs this, so replace rather than append twice)
+    const data = (model.get("series_data")[index] || {}).data;
+    if (data) {
+      if (data.length && data.at(-1).time === point.time) data[data.length - 1] = point;
+      else if (!data.length || data.at(-1).time < point.time) data.push(point);
+    }
+    updateLegend(null);
   }
   model.on("msg:custom", onCommand);
 
@@ -391,13 +514,14 @@ function render({ model, el }) {
       applyWatermark();
     },
     "change:chart_options": () => {
-      chart.applyOptions(model.get("chart_options") || {});
+      chart.applyOptions(resolveChartOptions(model.get("chart_options") || {}));
       applyAutoTimeScale();
       updateLegend(null);
     },
     "change:width": applySize,
     "change:height": applySize,
     "change:watermark": applyWatermark,
+    "change:pane_heights": applyPaneHeights,
     "change:fit_content": () => {
       if (model.get("fit_content")) chart.timeScale().fitContent();
     },

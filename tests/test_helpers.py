@@ -1,3 +1,5 @@
+import datetime
+
 import numpy as np
 import pandas as pd
 import polars as pl
@@ -255,3 +257,93 @@ def test_navigation_methods_send_commands(monkeypatch):
         {"command": "scrollToPosition", "position": -20, "animated": True},
         {"command": "fitContent"},
     ]
+
+
+# --- Crosshair, formatters, watermarks ---
+
+
+def test_crosshair_mode_names_and_shared_line_options():
+    assert W.crosshair(mode="magnet_ohlc", color="#888", style="dotted", horz_line={"visible": False}) == {
+        "crosshair": {
+            "mode": 3,
+            "vertLine": {"color": "#888", "style": 1},
+            "horzLine": {"color": "#888", "style": 1, "visible": False},
+        }
+    }
+    with pytest.raises(ValueError):
+        W.crosshair(mode="sticky")
+
+
+def test_number_format_as_series_price_format(df):
+    fmt = W.number_format(style="currency", currency="EUR", maximum_fraction_digits=0, locale="de-DE")
+    assert fmt == {
+        "intl": "number",
+        "options": {"style": "currency", "currency": "EUR", "maximumFractionDigits": 0},
+        "locale": "de-DE",
+    }
+    assert W.line(df, price_format=fmt)["options"]["priceFormat"] == fmt
+
+
+def test_localization_builds_formatter_specs():
+    opts = W.localization(
+        locale="de-DE",
+        price_formatter=W.number_format(notation="compact"),
+        tick_formatters={"month": W.date_format(month="long")},
+    )
+    assert opts["localization"]["locale"] == "de-DE"
+    assert opts["localization"]["priceFormatter"]["intl"] == "number"
+    assert opts["timeScale"]["tickMarkFormatter"]["month"] == {"intl": "date", "options": {"month": "long"}}
+    with pytest.raises(ValueError, match="tick types"):
+        W.localization(tick_formatters={"week": W.date_format()})
+
+
+def test_image_watermark_embeds_local_files(tmp_path):
+    path = tmp_path / "logo.png"
+    path.write_bytes(b"\x89PNG fake")
+    wm = W.image_watermark(path, alpha=0.5, max_width=100)
+    assert wm["image"].startswith("data:image/png;base64,")
+    assert wm["alpha"] == 0.5 and wm["maxWidth"] == 100 and wm["pane"] == 0
+    assert W.image_watermark("https://example.com/logo.png")["image"] == "https://example.com/logo.png"
+    with pytest.raises(FileNotFoundError):
+        W.image_watermark(tmp_path / "missing.png")
+
+
+def test_watermark_accepts_a_list():
+    chart = W(watermark=[{"text": "AAPL"}, W.image_watermark(b"png")])
+    assert len(chart.watermark) == 2
+
+
+def test_marker_and_price_line_ids():
+    assert W.marker("2024-01-02", id="buy-1")["id"] == "buy-1"
+    assert "id" not in W.marker("2024-01-02")
+    assert W.price_line(100, id="stop")["id"] == "stop"
+
+
+# --- Live updates ---
+
+
+def test_update_appends_replaces_and_ignores_older(df, monkeypatch):
+    chart = W(series_data=[W.line(df.head(3))])
+    sent = []
+    monkeypatch.setattr(chart, "send", sent.append)
+    data = chart.series_data[0]["data"]
+
+    chart.update({"time": pd.Timestamp("2024-01-03"), "value": 1.0})  # replaces the last bar
+    assert data[-1] == {"time": "2024-01-03", "value": 1.0} and len(data) == 3
+    chart.update({"time": datetime.date(2024, 1, 4), "value": 2.0})  # appends
+    assert data[-1]["time"] == "2024-01-04" and len(data) == 4
+    chart.update({"time": "2024-01-01", "value": 3.0})  # older: ignored
+    assert len(data) == 4 and len(sent) == 2
+    assert sent[1] == {"command": "update", "series": 0, "point": {"time": "2024-01-04", "value": 2.0}}
+
+
+def test_update_intraday_converts_to_unix_seconds(df):
+    intraday = df.head(2).assign(Date=pd.date_range("2024-01-02 09:30", periods=2, freq="5min"))
+    chart = W(series_data=[W.line(intraday)])
+    chart.send = lambda msg: None
+    chart.update({"time": datetime.datetime(2024, 1, 2, 9, 40), "value": 1.0})
+    assert chart.series_data[0]["data"][-1]["time"] == 1704188400
+
+
+def test_image_watermark_detects_svg_bytes():
+    assert W.image_watermark(b'<svg width="10" height="10"></svg>')["image"].startswith("data:image/svg+xml;base64,")

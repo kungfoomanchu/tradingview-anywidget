@@ -2,10 +2,16 @@
 
 A TradingView [Lightweight Charts](https://github.com/tradingview/lightweight-charts) widget for [marimo](https://marimo.io/) notebooks, built with [anywidget](https://anywidget.dev/).
 
+![Candlestick chart with volume, RSI and MACD panes](docs/screenshot.png)
+
 ## Install
 
+Not on PyPI yet; install from GitHub:
+
 ```bash
-uv pip install tradingview-anywidget
+uv pip install "tradingview-anywidget @ git+https://github.com/kungfoomanchu/tradingview-anywidget"
+# optional: technical indicators via pandas-ta
+uv pip install pandas-ta
 ```
 
 ## Quick Start
@@ -19,15 +25,51 @@ W = LightweightChartWidget
 # From a pandas/polars DataFrame with OHLCV columns:
 chart = mo.ui.anywidget(
     W(
-        series_data=[W.candlestick(df), W.volume(df)],
-        chart_options=W.dark_theme(),
+        series_data=[W.candlestick(df), W.volume(df), W.sma(df, period=20)],
+        chart_options=W.theme(mo.app_meta().theme),  # follow the notebook's light/dark theme
         height=500,
     )
 )
 chart
 ```
 
+Indicators that aren't on the price scale go in their own pane below the chart:
+
+```python
+series_data = [W.candlestick(df), W.volume(df), W.pta_rsi(df)] + W.pta_macd(df, pane=2)
+```
+
 See [examples/demo.py](examples/demo.py) for a full interactive demo.
+
+### Data
+
+All helpers take a pandas or polars DataFrame:
+
+- **Columns** are matched case-insensitively (`Close` or `close`); a missing column raises `KeyError`.
+- **Times** come from `time_column=` (default `"date"`), any `time`/`date`/`datetime`/`timestamp` column, or a pandas `DatetimeIndex`.
+  Daily data is sent as `"YYYY-MM-DD"`; intraday data as unix seconds, shown in the data's own wall-clock time.
+- **Missing values** (NaN, None) are skipped.
+- **Extra keyword arguments** are passed through as Lightweight Charts series options, e.g. `W.line(df, color="#f00", title="Close")`.
+
+### Series config
+
+Each helper returns a plain dict you can edit before passing it in `series_data`:
+
+| Key | Meaning |
+|-----|---------|
+| `type` | `"Candlestick"`, `"Bar"`, `"Line"`, `"Area"`, `"Baseline"` or `"Histogram"` |
+| `data` | List of points, e.g. `{"time": "2024-01-15", "value": 1.5}` |
+| `options` | Series options (`color`, `title`, `priceScaleId`, ...) |
+| `pane` | Pane index: `0` = main price pane (default), `1`+ = panes below it |
+| `priceScale` | Options for the series' price scale (e.g. `scaleMargins`) |
+| `markers` | List of `W.marker(...)` dicts |
+| `price_lines` | List of `W.price_line(...)` dicts |
+
+### Events
+
+`crosshair_data`, `clicked_data` and `visible_range` are synced back to Python
+(`chart.value["crosshair_data"]` in marimo). Crosshair updates are throttled to
+10 per second and range updates are sent once scrolling stops.
 
 ## Lightweight Charts API Coverage
 
@@ -38,31 +80,33 @@ See [examples/demo.py](examples/demo.py) for a full interactive demo.
 | Category | Wrapped | Available | Coverage |
 |----------|---------|-----------|----------|
 | Series Types | 6 | 6 | **100%** |
-| Chart Methods | ~7 | 15+ | ~40% |
+| Chart Methods | ~8 | 15+ | ~50% |
 | Series Methods | ~4 | 20+ | ~20% |
 | Time Scale | 3 | 15+ | ~20% |
 | Price Scale | 1 | 6 | ~17% |
-| Pane API | 0 | 15+ | 0% |
+| Pane API | 3 | 15+ | ~20% |
 | Events | 2 | 5+ | ~40% |
 | Chart Options | 4 groups | 20+ | ~20% |
 | Series Options | ~15 | 60+ | ~25% |
 | Plugins | 2 | 4+ | ~50% |
 
-**Overall: ~20-25%** of the lightweight-charts v5 API surface.
+**Overall: ~25%** of the lightweight-charts v5 API surface (v5.2).
 
 ### What IS wrapped
 
 - **All 6 series types**: Candlestick, Line, Area, Bar, Baseline, Histogram
 - **Chart creation**: `createChart()` with width/height/autoSize
 - **Dynamic updates**: `applyOptions()` for chart options, series add/remove/setData
+- **Panes**: series `pane` index (`addSeries(type, options, paneIndex)`), automatic pane sizing (`setStretchFactor`), per-pane legends
 - **Overlays**: Price lines, series markers (`createSeriesMarkers`), text watermark (`createTextWatermark`)
 - **Events**: Crosshair move, click (with OHLC data), visible time range change (bidirectional)
 - **Basic chart options**: Layout (background, textColor), grid (line colors), crosshair mode
-- **Python helpers**: SMA, EMA, volume overlay, dark/light themes, pandas/polars DataFrame conversion
+- **Legend**: OHLC / series values with titles and colors, formatted with each series' price formatter
+- **Python helpers**: SMA, EMA, volume overlay, dark/light themes (`W.theme()`), pandas/polars DataFrame conversion (daily and intraday)
 - **pandas-ta integration** (optional `pip install pandas-ta`):
   - Generic `W.pta(df, "indicator_name")` works with any of 200+ indicators
   - 10 curated helpers with smart defaults: `pta_rsi`, `pta_macd`, `pta_bbands`, `pta_stoch`, `pta_atr`, `pta_adx`, `pta_obv`, `pta_supertrend`, `pta_vwap`, `pta_ichimoku`
-  - Auto-detects overlay vs oscillator scale placement
+  - Auto-detects overlay vs oscillator placement (oscillators get their own pane)
   - Built-in overbought/oversold reference lines (RSI, Stochastic), green/red histogram (MACD), directional coloring (Supertrend)
 
 ### What is NOT yet wrapped
@@ -77,9 +121,9 @@ See [examples/demo.py](examples/demo.py) for a full interactive demo.
 
 **Medium value:**
 
-- **Multi-pane support** - `addPane()`, `removePane()`, `swapPanes()`, pane sizing (needed for separate indicator panels like RSI)
+- **More pane control** - `removePane()`, `swapPanes()`, explicit pane heights (`setHeight()`)
 - **Coordinate conversions** - `priceToCoordinate()`, `coordinateToPrice()`, `timeToCoordinate()` (needed for custom overlays)
-- **More events** - `dblClick`, `subscribeDataChanged`, `subscribeVisibleLogicalRangeChange`, `subscribeSizeChange`
+- **More events** - `dblClick`, `subscribeDataChanged`, `subscribeVisibleLogicalRangeChange`, `subscribeSizeChange`, hovered series (`hoveredItem`, v5.2)
 - **Crosshair sub-options** - `vertLine`/`horzLine` colors, width, style, label visibility; all mode values (Normal/Magnet/Hidden)
 - **Localization** - locale, date/number formatting
 - **Image watermarks** - `createImageWatermark()`
@@ -102,7 +146,7 @@ W(chart_options={
 })
 ```
 
-Features that **cannot** be accessed via passthrough (and require JS changes) include: method calls (`scrollToRealTime()`, coordinate conversions, data queries) and the multi-pane API.
+Features that **cannot** be accessed via passthrough (and require JS changes) include: method calls (`scrollToRealTime()`, coordinate conversions, data queries) and pane methods other than placing series in panes.
 
 ## Development
 
@@ -128,14 +172,35 @@ git add lightweight-charts
 git commit -m "Update lightweight-charts submodule"
 ```
 
-### Agent skills
+Then bump the CDN import in `src/tradingview_anywidget/chart.js` (`lightweight-charts@5.x`)
+to the same minor version and check `website/docs/release-notes.md` for API changes.
 
-This project includes AI agent skills (in `.agents/skills/` and `.claude/skills/`) managed by [skills.sh](https://skills.sh). These provide coding agents with domain knowledge about marimo notebooks and anywidget development.
-
-**Install skills into a fresh clone:**
+### Run the tests
 
 ```bash
-npx skills add marimo-team/skills
+uv run --extra dev pytest
+```
+
+### Agent skills
+
+This project includes AI agent skills (in `.agents/skills/`, symlinked into `.claude/skills/`) managed by [skills.sh](https://skills.sh):
+
+- `marimo-notebook` and `anywidget-generator` from [marimo-team/skills](https://github.com/marimo-team/skills)
+- `lightweight-charts` from [tradingview/lightweight-charts](https://github.com/tradingview/lightweight-charts) (v5 API conventions and foot-guns)
+
+The skills are committed, so a fresh clone already has them. To re-download them
+from `skills-lock.json` (into `.agents/skills/`):
+
+```bash
+npx skills experimental_install
+```
+
+**Add them from scratch:**
+
+```bash
+npx skills add marimo-team/skills -s marimo-notebook -y
+npx skills add marimo-team/skills -s anywidget-generator -y
+npx skills add tradingview/lightweight-charts -s lightweight-charts -y
 ```
 
 **Check for updates:**
@@ -155,5 +220,7 @@ The `skills-lock.json` file pins skill versions. Commit it after updating so col
 ### Run the demo notebook
 
 ```bash
-uv run marimo edit examples/demo.py
+uv run --extra dev marimo edit examples/demo.py
+# or in an isolated sandbox using the script's own dependencies:
+uvx marimo edit --sandbox examples/demo.py
 ```

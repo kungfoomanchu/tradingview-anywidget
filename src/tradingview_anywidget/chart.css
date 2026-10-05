@@ -1,36 +1,31 @@
 .lwc-container {
   position: relative;
-  width: 100%;
   border-radius: 6px;
   overflow: hidden;
 }
 
+/* Text color is set from the chart's layout.textColor so it matches the chart theme */
 .lwc-legend {
   position: absolute;
-  top: 8px;
   left: 12px;
   z-index: 10;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  max-width: calc(100% - 90px);
+  font-family: -apple-system, BlinkMacSystemFont, "Trebuchet MS", Roboto, Ubuntu, sans-serif;
   font-size: 12px;
+  line-height: 16px;
   pointer-events: none;
-  color: #434651;
 }
 
-.lwc-legend-item {
-  margin-right: 12px;
+.lwc-legend-title {
+  margin-right: 6px;
+  opacity: 0.75;
 }
 
 .lwc-val {
+  font-variant-numeric: tabular-nums;
   font-weight: 600;
-  margin-left: 2px;
-  color: #131722;
-}
-
-@media (prefers-color-scheme: dark) {
-  .lwc-legend {
-    color: #787b86;
-  }
-  .lwc-val {
-    color: #d1d4dc;
-  }
+  margin: 0 2px;
 }

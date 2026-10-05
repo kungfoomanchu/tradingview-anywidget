@@ -1,7 +1,9 @@
 """TradingView Lightweight Charts anywidget for marimo notebooks."""
 
+import calendar
 import datetime
 import math
+import re
 from pathlib import Path
 
 import anywidget
@@ -9,148 +11,198 @@ import traitlets
 
 _DIR = Path(__file__).parent
 
+_TIME_COLUMNS = ("time", "date", "datetime", "timestamp")
 
-def _df_to_records(df):
-    """Convert a pandas or polars DataFrame to a list of dicts."""
-    # Polars
-    if hasattr(df, "to_dicts"):
-        records = df.to_dicts()
-        for rec in records:
-            for k, v in rec.items():
-                if isinstance(v, (datetime.date, datetime.datetime)):
-                    rec[k] = v.strftime("%Y-%m-%d")
-        return records
-    # Pandas
-    if hasattr(df, "to_dict") and hasattr(df, "columns"):
-        records = df.to_dict(orient="records")
-        for rec in records:
-            for k, v in rec.items():
-                if hasattr(v, "isoformat"):
-                    rec[k] = v.strftime("%Y-%m-%d")
-        return records
-    raise TypeError(f"Unsupported data type: {type(df)}")
+UP_COLOR = "#26a69a"
+DOWN_COLOR = "#ef5350"
 
 
-def _ensure_time_key(records, time_column="date"):
-    """Ensure each record has a 'time' key, renaming from time_column if needed."""
-    if not records:
-        return records
-    if "time" in records[0]:
-        return records
-    # Build a priority list of candidate column names
-    candidates = [time_column]
-    for name in ("Date", "date", "datetime", "timestamp"):
-        if name != time_column:
-            candidates.append(name)
-    out = []
-    for rec in records:
-        r = dict(rec)
-        for candidate in candidates:
-            if candidate in r:
-                r["time"] = r.pop(candidate)
-                break
-        out.append(r)
-    return out
+# ---------------------------------------------------------------------------
+# DataFrame helpers (work with both pandas and polars, no hard dependency)
+# ---------------------------------------------------------------------------
 
 
-def _normalize_ohlcv_keys(records):
-    """Normalize OHLCV column names to lowercase (Open->open, etc.)."""
-    mapping = {
-        "Open": "open",
-        "High": "high",
-        "Low": "low",
-        "Close": "close",
-        "Volume": "volume",
-        "Value": "value",
-    }
-    out = []
-    for rec in records:
-        r = {}
-        for k, v in rec.items():
-            r[mapping.get(k, k)] = v
-        out.append(r)
-    return out
+def _find_column(df, name):
+    """Return the actual column name matching `name` (exact match first, then case-insensitive)."""
+    columns = [str(c) for c in df.columns]
+    if name in columns:
+        return name
+    for c in columns:
+        if c.lower() == name.lower():
+            return c
+    raise KeyError(f"Column {name!r} not found. Available columns: {columns}")
+
+
+def _column_values(df, name):
+    """Return a column as a list of floats, with None for NaN/Inf/missing values."""
+    return [_safe_float(v) for v in df[_find_column(df, name)].to_list()]
 
 
 def _safe_float(v):
-    """Convert to float, returning None if NaN or Inf."""
+    """Convert to float, returning None if missing, NaN or Inf."""
+    if v is None:
+        return None
     f = float(v)
     if math.isnan(f) or math.isinf(f):
         return None
     return f
 
 
+def _is_missing(v):
+    return v is None or v != v  # NaN and NaT are not equal to themselves
+
+
+def _to_unix_seconds(dt):
+    """Datetime -> UTC seconds, keeping the wall-clock time (timezone info is dropped).
+
+    Lightweight Charts displays all timestamps as UTC, so dropping the timezone makes
+    a 09:30 New York bar show as 09:30 on the axis.
+    """
+    return calendar.timegm(dt.replace(tzinfo=None).timetuple())
+
+
+def _convert_times(values):
+    """Convert a column of dates/datetimes into Lightweight Charts times.
+
+    The whole column gets one format, as required by Lightweight Charts:
+    - all dates at midnight -> "YYYY-MM-DD" strings (daily or slower data)
+    - any time-of-day       -> unix seconds (intraday data)
+    Strings and numbers are passed through unchanged. Missing values become None.
+    """
+    present = [v for v in values if not _is_missing(v)]
+    if not present or not all(isinstance(v, datetime.date) for v in present):
+        return [None if _is_missing(v) else v for v in values]
+    intraday = any(
+        isinstance(v, datetime.datetime) and v.time() != datetime.time() for v in present
+    )
+    if intraday:
+        return [None if _is_missing(v) else _to_unix_seconds(v) for v in values]
+    return [None if _is_missing(v) else v.strftime("%Y-%m-%d") for v in values]
+
+
+def _time_values(df, time_column="date"):
+    """Return the time of each row, from `time_column`, a common time column, or the index."""
+    for candidate in (time_column, *_TIME_COLUMNS):
+        try:
+            return _convert_times(df[_find_column(df, candidate)].to_list())
+        except KeyError:
+            continue
+    index = getattr(df, "index", None)  # pandas only; polars has no index
+    if index is not None and len(index) and isinstance(index[0], datetime.date):
+        return _convert_times(index.to_list())
+    raise KeyError(
+        f"No time column found. Looked for {time_column!r} and {list(_TIME_COLUMNS)} "
+        f"(case-insensitive) and a datetime index. Pass time_column=... to choose one."
+    )
+
+
+def _value_points(times, values):
+    """Zip times and values into [{time, value}], skipping rows with a missing time or value."""
+    return [
+        {"time": t, "value": v}
+        for t, v in zip(times, values)
+        if t is not None and v is not None
+    ]
+
+
+def _line_points(df, column, time_column):
+    return _value_points(_time_values(df, time_column), _column_values(df, column))
+
+
+def _ohlc_points(df, time_column):
+    """[{time, open, high, low, close}], skipping rows with any missing value."""
+    times = _time_values(df, time_column)
+    ohlc = [_column_values(df, k) for k in ("open", "high", "low", "close")]
+    return [
+        {"time": t, "open": o, "high": h, "low": l, "close": c}
+        for t, o, h, l, c in zip(times, *ohlc)
+        if t is not None and None not in (o, h, l, c)
+    ]
+
+
+def _series(type_, data, defaults, options, **extra):
+    """Build a series config dict, letting user `options` override `defaults`."""
+    return {"type": type_, "data": data, "options": {**defaults, **options}, **extra}
+
+
+# Options shared by indicator lines that shouldn't clutter the price axis
+_QUIET = {"priceLineVisible": False, "lastValueVisible": False}
+
+
 # ---------------------------------------------------------------------------
 # pandas-ta helpers (optional dependency)
 # ---------------------------------------------------------------------------
 
+
 def _require_pandas_ta():
     """Lazily import pandas-ta, raising a clear error if missing."""
     try:
-        import pandas_ta as pta
-        return pta
+        import pandas_ta
     except ImportError:
         raise ImportError(
             "pandas-ta is required for pta_ indicator helpers. "
-            "Install it with:  pip install pandas-ta  (or uv pip install pandas-ta)"
+            "Install it with:  uv pip install pandas-ta"
         ) from None
+    return pandas_ta
 
 
-def _ensure_pandas_df(df):
-    """Ensure df is a pandas DataFrame (pandas-ta requires it)."""
+def _pta_input(df, time_column):
+    """Prepare a DataFrame for pandas-ta.
+
+    Returns (pandas_ta module, pandas DataFrame indexed by datetime, row times, OHLCV dict).
+    A DatetimeIndex is required by some indicators (VWAP) and makes forward-shifted
+    outputs (Ichimoku spans) carry real future dates.
+    """
     import pandas as pd
-    if isinstance(df, pd.DataFrame):
-        return df
-    # Polars → pandas
-    if hasattr(df, "to_pandas"):
-        return df.to_pandas()
-    raise TypeError(
-        f"pta_ helpers require a pandas DataFrame, got {type(df).__name__}. "
-        "Convert with df.to_pandas() if using polars."
-    )
 
+    pta = _require_pandas_ta()
+    if not isinstance(df, pd.DataFrame):
+        if not hasattr(df, "to_dict"):
+            raise TypeError(f"pta_ helpers need a pandas or polars DataFrame, got {type(df).__name__}")
+        df = pd.DataFrame(df.to_dict(as_series=False))  # polars -> pandas without pyarrow
 
-def _ohlcv_series(pdf):
-    """Extract OHLCV pandas Series from a DataFrame (case-insensitive columns)."""
-    import pandas as pd
-    col_map = {}
-    for c in pdf.columns:
-        cl = c.lower()
-        if cl in ("open", "high", "low", "close", "volume"):
-            col_map[cl] = c
-    return {k: pdf[v] for k, v in col_map.items()}
-
-
-def _extract_times(pdf, time_column="date"):
-    """Extract a list of time strings aligned to the DataFrame rows."""
-    for candidate in (time_column, "Date", "date", "datetime", "timestamp", "time"):
-        if candidate in pdf.columns:
-            return [
-                v.strftime("%Y-%m-%d") if hasattr(v, "strftime") else str(v)
-                for v in pdf[candidate]
-            ]
-    # Fall back to index
-    return [
-        v.strftime("%Y-%m-%d") if hasattr(v, "strftime") else str(v)
-        for v in pdf.index
-    ]
-
-
-def _ta_col_to_data(series_values, times):
-    """Convert a pandas Series (aligned to times) to [{time, value}], dropping NaN."""
-    data = []
-    for i, val in enumerate(series_values):
-        if i >= len(times):
+    times = _time_values(df, time_column)
+    if not isinstance(df.index, pd.DatetimeIndex):
+        for candidate in (time_column, *_TIME_COLUMNS):
+            try:
+                col = _find_column(df, candidate)
+            except KeyError:
+                continue
+            df = df.set_index(pd.DatetimeIndex(df[col]))
             break
-        v = _safe_float(val) if val is not None else None
-        if v is None:
-            continue
-        data.append({"time": times[i], "value": v})
-    return data
 
+    ohlcv = {}
+    for name in ("open", "high", "low", "close", "volume"):
+        try:
+            ohlcv[name] = df[_find_column(df, name)].astype(float)
+        except KeyError:
+            pass
+    return pta, df, times, ohlcv
+
+
+def _pta_check(result, name):
+    if result is None:
+        raise ValueError(
+            f"pandas-ta {name} returned None - check the DataFrame has enough rows "
+            "and the required OHLCV columns."
+        )
+    return result
+
+
+def _pta_column(result, prefix):
+    """Find a pandas-ta output column by prefix, e.g. "MACDh_" -> "MACDh_12_26_9"."""
+    return next(c for c in result.columns if c.startswith(prefix))
+
+
+def _pta_points(series, times):
+    return _value_points(times, [_safe_float(v) for v in series])
+
+
+# pandas-ta names histogram columns like MACDh_12_26_9, PPOh_12_26_9, ...
+_HISTOGRAM_COLUMN = re.compile(r"^[A-Z]+h_")
 
 # Indicators whose values are NOT on the price scale (oscillators/volume indicators).
-# The generic W.pta() uses this to auto-assign a separate priceScaleId.
+# The generic W.pta() puts these in their own pane below the price chart.
 _OSCILLATOR_INDICATORS = frozenset([
     # Momentum / oscillators
     "rsi", "stoch", "stochrsi", "cci", "mfi", "willr", "roc", "mom",
@@ -166,6 +218,13 @@ _OSCILLATOR_INDICATORS = frozenset([
     "atr", "natr", "true_range",
 ])
 
+_PALETTE = ["#2962FF", "#FF6D00", "#E040FB", "#00BCD4", "#76FF03"]
+
+
+def _guide_line(price, color, title):
+    """Dashed horizontal reference line, e.g. RSI overbought at 70."""
+    return {"price": price, "color": color, "lineWidth": 1, "lineStyle": 2, "axisLabelVisible": True, "title": title}
+
 
 class LightweightChartWidget(anywidget.AnyWidget):
     """TradingView Lightweight Charts widget.
@@ -174,11 +233,13 @@ class LightweightChartWidget(anywidget.AnyWidget):
         series_data: List of series configs. Each is a dict with keys:
             - type: "Candlestick", "Line", "Area", "Bar", "Baseline", "Histogram"
             - data: list of data points (dicts with 'time' key)
-            - options: dict of series-specific options (colors, etc.)
+            - options: dict of series-specific options (colors, title, etc.)
+            - pane: optional pane index (0 = main price pane, 1+ = panes below it)
+            - priceScale: optional price scale options for this series' scale
             - markers: optional list of markers for this series
             - price_lines: optional list of price lines for this series
         chart_options: Dict of chart-level options (layout, grid, crosshair, etc.)
-        width: Chart width in pixels (0 = auto-size to container)
+        width: Chart width in pixels (0 = fill the container width)
         height: Chart height in pixels
         watermark: Watermark configuration dict
         fit_content: Whether to auto-fit content when data changes
@@ -209,111 +270,53 @@ class LightweightChartWidget(anywidget.AnyWidget):
     crosshair_data = traitlets.Dict({}).tag(sync=True)
     clicked_data = traitlets.Dict({}).tag(sync=True)
 
-    # --- Helpers for building series configs ---
+    # ------------------------------------------------------------------
+    # Series builders
+    #
+    # All builders take a pandas or polars DataFrame. Column names are matched
+    # case-insensitively. Times come from `time_column`, a common time column
+    # (time/date/datetime/timestamp) or a datetime index. Rows with missing
+    # values are skipped. Extra keyword arguments are passed through as
+    # Lightweight Charts series options and override the defaults.
+    # ------------------------------------------------------------------
 
     @staticmethod
     def candlestick(df, time_column="date", **options):
-        """Create a candlestick series config from a DataFrame.
-
-        Expects columns: open, high, low, close (case-insensitive).
-        """
-        records = _df_to_records(df)
-        records = _normalize_ohlcv_keys(records)
-        records = _ensure_time_key(records, time_column)
-        data = []
-        for r in records:
-            d = {"time": r["time"]}
-            skip = False
-            for k in ("open", "high", "low", "close"):
-                if k in r:
-                    v = _safe_float(r[k])
-                    if v is None:
-                        skip = True
-                        break
-                    d[k] = v
-            if not skip:
-                data.append(d)
+        """Candlestick series from open/high/low/close columns."""
         defaults = {
-            "upColor": "#26a69a",
-            "downColor": "#ef5350",
+            "upColor": UP_COLOR,
+            "downColor": DOWN_COLOR,
             "borderVisible": False,
-            "wickUpColor": "#26a69a",
-            "wickDownColor": "#ef5350",
+            "wickUpColor": UP_COLOR,
+            "wickDownColor": DOWN_COLOR,
         }
-        defaults.update(options)
-        return {"type": "Candlestick", "data": data, "options": defaults}
+        return _series("Candlestick", _ohlc_points(df, time_column), defaults, options)
+
+    @staticmethod
+    def bar(df, time_column="date", **options):
+        """OHLC bar series from open/high/low/close columns."""
+        defaults = {"upColor": UP_COLOR, "downColor": DOWN_COLOR}
+        return _series("Bar", _ohlc_points(df, time_column), defaults, options)
 
     @staticmethod
     def line(df, column="close", time_column="date", **options):
-        """Create a line series config from a DataFrame column."""
-        records = _df_to_records(df)
-        records = _normalize_ohlcv_keys(records)
-        records = _ensure_time_key(records, time_column)
-        col = column.lower()
-        data = [
-            {"time": r["time"], "value": v}
-            for r in records
-            if col in r and (v := _safe_float(r[col])) is not None
-        ]
+        """Line series from one column."""
         defaults = {"color": "#2962FF", "lineWidth": 2}
-        defaults.update(options)
-        return {"type": "Line", "data": data, "options": defaults}
+        return _series("Line", _line_points(df, column, time_column), defaults, options)
 
     @staticmethod
     def area(df, column="close", time_column="date", **options):
-        """Create an area series config from a DataFrame column."""
-        records = _df_to_records(df)
-        records = _normalize_ohlcv_keys(records)
-        records = _ensure_time_key(records, time_column)
-        col = column.lower()
-        data = [
-            {"time": r["time"], "value": v}
-            for r in records
-            if col in r and (v := _safe_float(r[col])) is not None
-        ]
+        """Area series from one column."""
         defaults = {
             "lineColor": "#2962FF",
             "topColor": "rgba(41, 98, 255, 0.56)",
             "bottomColor": "rgba(41, 98, 255, 0.04)",
         }
-        defaults.update(options)
-        return {"type": "Area", "data": data, "options": defaults}
-
-    @staticmethod
-    def bar(df, time_column="date", **options):
-        """Create a bar series config from a DataFrame (OHLC data)."""
-        records = _df_to_records(df)
-        records = _normalize_ohlcv_keys(records)
-        records = _ensure_time_key(records, time_column)
-        data = []
-        for r in records:
-            d = {"time": r["time"]}
-            skip = False
-            for k in ("open", "high", "low", "close"):
-                if k in r:
-                    v = _safe_float(r[k])
-                    if v is None:
-                        skip = True
-                        break
-                    d[k] = v
-            if not skip:
-                data.append(d)
-        defaults = {"upColor": "#26a69a", "downColor": "#ef5350"}
-        defaults.update(options)
-        return {"type": "Bar", "data": data, "options": defaults}
+        return _series("Area", _line_points(df, column, time_column), defaults, options)
 
     @staticmethod
     def baseline(df, column="close", time_column="date", base_value=0, **options):
-        """Create a baseline series config from a DataFrame column."""
-        records = _df_to_records(df)
-        records = _normalize_ohlcv_keys(records)
-        records = _ensure_time_key(records, time_column)
-        col = column.lower()
-        data = [
-            {"time": r["time"], "value": v}
-            for r in records
-            if col in r and (v := _safe_float(r[col])) is not None
-        ]
+        """Baseline series: green above `base_value`, red below."""
         defaults = {
             "baseValue": {"type": "price", "price": base_value},
             "topLineColor": "rgba(38, 166, 154, 1)",
@@ -323,98 +326,56 @@ class LightweightChartWidget(anywidget.AnyWidget):
             "bottomFillColor1": "rgba(239, 83, 80, 0.05)",
             "bottomFillColor2": "rgba(239, 83, 80, 0.28)",
         }
-        defaults.update(options)
-        return {"type": "Baseline", "data": data, "options": defaults}
+        return _series("Baseline", _line_points(df, column, time_column), defaults, options)
 
     @staticmethod
     def histogram(df, column="close", time_column="date", **options):
-        """Create a histogram series config from a DataFrame column."""
-        records = _df_to_records(df)
-        records = _normalize_ohlcv_keys(records)
-        records = _ensure_time_key(records, time_column)
-        col = column.lower()
-        data = [
-            {"time": r["time"], "value": v}
-            for r in records
-            if col in r and (v := _safe_float(r[col])) is not None
-        ]
-        defaults = {"color": "#26a69a"}
-        defaults.update(options)
-        return {"type": "Histogram", "data": data, "options": defaults}
+        """Histogram series from one column."""
+        defaults = {"color": UP_COLOR}
+        return _series("Histogram", _line_points(df, column, time_column), defaults, options)
 
     @staticmethod
     def volume(df, time_column="date", up_color="rgba(38,166,154,0.5)", down_color="rgba(239,83,80,0.5)", **options):
-        """Create a volume histogram series from OHLCV DataFrame.
+        """Volume histogram, green/red by close vs open, overlaid on the bottom 20% of the price pane.
 
-        Colors bars green/red based on close vs open.
-        Renders on a separate overlay price scale.
+        For a separate volume pane instead, set `config["pane"] = 1` on the result.
         """
-        records = _df_to_records(df)
-        records = _normalize_ohlcv_keys(records)
-        records = _ensure_time_key(records, time_column)
-        data = []
-        for r in records:
-            if "volume" not in r:
-                continue
-            vol = _safe_float(r["volume"])
-            if vol is None:
-                continue
-            color = up_color if float(r.get("close", 0)) >= float(r.get("open", 0)) else down_color
-            data.append({"time": r["time"], "value": vol, "color": color})
-        defaults = {
-            "priceFormat": {"type": "volume"},
-            "priceScaleId": "volume",
-        }
-        defaults.update(options)
-        series_config = {"type": "Histogram", "data": data, "options": defaults}
-        # Volume uses a separate price scale at the bottom
-        series_config["priceScale"] = {
-            "scaleMargins": {"top": 0.8, "bottom": 0},
-        }
-        return series_config
+        times = _time_values(df, time_column)
+        volumes = _column_values(df, "volume")
+        opens = _column_values(df, "open")
+        closes = _column_values(df, "close")
+        data = [
+            {"time": t, "value": v, "color": up_color if (c or 0) >= (o or 0) else down_color}
+            for t, v, o, c in zip(times, volumes, opens, closes)
+            if t is not None and v is not None
+        ]
+        defaults = {"priceFormat": {"type": "volume"}, "priceScaleId": "volume", "title": "Vol", **_QUIET}
+        return _series(
+            "Histogram", data, defaults, options,
+            priceScale={"scaleMargins": {"top": 0.8, "bottom": 0}},
+        )
 
     @staticmethod
     def sma(df, period=20, column="close", time_column="date", **options):
-        """Create a Simple Moving Average line series from a DataFrame.
-
-        Computes SMA in pure Python - no extra dependencies needed.
-        """
-        records = _df_to_records(df)
-        records = _normalize_ohlcv_keys(records)
-        records = _ensure_time_key(records, time_column)
-        col = column.lower()
-        values = [_safe_float(r[col]) for r in records if col in r]
-        times = [r["time"] for r in records if col in r]
+        """Simple Moving Average line. Pure Python - no extra dependencies needed."""
+        times = _time_values(df, time_column)
+        values = _column_values(df, column)
         data = []
-        for i in range(len(values)):
-            if i < period - 1:
-                continue
+        for i in range(period - 1, len(values)):
             window = values[i - period + 1 : i + 1]
-            if any(v is None for v in window):
-                continue
-            avg = sum(window) / period
-            data.append({"time": times[i], "value": round(avg, 4)})
-        defaults = {
-            "color": "#FF6D00",
-            "lineWidth": 1,
-            "priceLineVisible": False,
-            "lastValueVisible": False,
-        }
-        defaults.update(options)
-        return {"type": "Line", "data": data, "options": defaults}
+            if times[i] is not None and None not in window:
+                data.append({"time": times[i], "value": round(sum(window) / period, 4)})
+        defaults = {"color": "#FF6D00", "lineWidth": 1, "title": f"SMA {period}", **_QUIET}
+        return _series("Line", data, defaults, options)
 
     @staticmethod
     def ema(df, period=20, column="close", time_column="date", **options):
-        """Create an Exponential Moving Average line series from a DataFrame.
+        """Exponential Moving Average line, seeded with the SMA of the first `period` values.
 
-        Computes EMA in pure Python - no extra dependencies needed.
+        Pure Python - no extra dependencies needed.
         """
-        records = _df_to_records(df)
-        records = _normalize_ohlcv_keys(records)
-        records = _ensure_time_key(records, time_column)
-        col = column.lower()
-        values = [_safe_float(r[col]) for r in records if col in r]
-        times = [r["time"] for r in records if col in r]
+        times = _time_values(df, time_column)
+        values = _column_values(df, column)
         multiplier = 2 / (period + 1)
         data = []
         ema_val = None
@@ -422,42 +383,37 @@ class LightweightChartWidget(anywidget.AnyWidget):
             if v is None:
                 continue
             if ema_val is None:
-                if i >= period - 1:
-                    # Seed with SMA of first `period` values
-                    window = values[i - period + 1 : i + 1]
-                    if any(x is None for x in window):
-                        continue
-                    ema_val = sum(window) / period
-                    data.append({"time": times[i], "value": round(ema_val, 4)})
+                window = values[max(i - period + 1, 0) : i + 1]
+                if len(window) < period or None in window:
+                    continue
+                ema_val = sum(window) / period
             else:
                 ema_val = (v - ema_val) * multiplier + ema_val
+            if times[i] is not None:
                 data.append({"time": times[i], "value": round(ema_val, 4)})
-        defaults = {
-            "color": "#2196F3",
-            "lineWidth": 1,
-            "priceLineVisible": False,
-            "lastValueVisible": False,
-        }
-        defaults.update(options)
-        return {"type": "Line", "data": data, "options": defaults}
+        defaults = {"color": "#2196F3", "lineWidth": 1, "title": f"EMA {period}", **_QUIET}
+        return _series("Line", data, defaults, options)
 
     # ------------------------------------------------------------------
-    # pandas-ta integration (optional dependency: pip install pandas-ta)
+    # pandas-ta integration (optional dependency: uv pip install pandas-ta)
     # All methods prefixed with pta_ to keep autocomplete clean.
+    # Oscillators are placed in pane 1, below the price chart; pass pane=2
+    # etc. to stack several of them.
     # ------------------------------------------------------------------
 
     @staticmethod
-    def pta(df, indicator_name, time_column="date", **kwargs):
+    def pta(df, indicator_name, time_column="date", pane=None, **kwargs):
         """Compute ANY pandas-ta indicator and return series configs.
 
-        Works with all 200+ pandas-ta indicators. Auto-detects whether to
-        overlay on the price scale or use a separate oscillator scale.
+        Works with all 200+ pandas-ta indicators. Oscillators (RSI, MACD, ...) go in
+        their own pane below the price chart; overlays (SMA, BBands, ...) stay on it.
 
         Args:
-            df:             pandas (or polars) DataFrame with OHLCV data.
+            df:             pandas or polars DataFrame with OHLCV data.
             indicator_name: Any pandas-ta indicator name, e.g. "rsi", "macd",
                             "bbands", "stoch", "adx". Case-insensitive.
             time_column:    Name of the date/time column (default "date").
+            pane:           Pane index override (default: 1 for oscillators, 0 otherwise).
             **kwargs:       Passed directly to the pandas-ta function,
                             e.g. length=14, fast=12, slow=26.
 
@@ -469,482 +425,256 @@ class LightweightChartWidget(anywidget.AnyWidget):
             series_data = [W.candlestick(df)] + W.pta(df, "bbands", length=20)
             series_data = [W.candlestick(df)] + W.pta(df, "rsi", length=14)
         """
-        pta_mod = _require_pandas_ta()
-        pdf = _ensure_pandas_df(df)
-        times = _extract_times(pdf, time_column)
-        ohlcv = _ohlcv_series(pdf)
-
-        name_lower = indicator_name.lower()
-        fn = getattr(pta_mod, name_lower, None)
-        if fn is None:
-            raise ValueError(
-                f"pandas-ta has no indicator '{indicator_name}'. "
-                f"Check spelling or run: import pandas_ta as pta; pta.indicators()"
-            )
-
-        # Build call kwargs with OHLCV series - pass all as keyword args
-        # so that multi-input indicators (stoch, adx, etc.) get the right args
-        call_kwargs = dict(kwargs)
-        for arg_name in ("open", "high", "low", "close", "volume"):
-            if arg_name in ohlcv and arg_name not in call_kwargs:
-                call_kwargs[arg_name] = ohlcv[arg_name]
-
-        result = fn(**call_kwargs)
-
-        if result is None:
-            raise ValueError(
-                f"pandas-ta returned None for '{indicator_name}'. "
-                "Check that the DataFrame has enough rows and required columns."
-            )
-
         import pandas as pd
 
-        is_oscillator = name_lower in _OSCILLATOR_INDICATORS
-        scale_id = f"pta_{name_lower}"
-        colors = ["#2962FF", "#FF6D00", "#E040FB", "#00BCD4", "#76FF03"]
+        pta, pdf, times, ohlcv = _pta_input(df, time_column)
+        name = indicator_name.lower()
+        fn = getattr(pta, name, None)
+        if fn is None:
+            raise ValueError(
+                f"pandas-ta has no indicator {indicator_name!r}. "
+                "Check spelling or run: import pandas_ta as pta; pta.indicators()"
+            )
 
-        # Normalize to DataFrame
+        # Pass all OHLCV columns as keyword args so multi-input indicators
+        # (stoch, adx, ...) get the right inputs
+        result = _pta_check(fn(**{**ohlcv, **kwargs}), indicator_name)
+        if isinstance(result, tuple):  # e.g. ichimoku returns (values, forward spans)
+            result = result[0]
         if isinstance(result, pd.Series):
             result = result.to_frame()
 
+        if pane is None:
+            pane = 1 if name in _OSCILLATOR_INDICATORS else 0
+
+        # Overlays can include non-price columns (bbands bandwidth, supertrend direction);
+        # these go in their own pane so they don't squash the price chart
+        prices = [v for k in ("low", "high") if k in ohlcv for v in ohlcv[k].tolist() if v == v]
+
+        def looks_like_price(data):
+            if not prices:
+                return True
+            median = sorted(p["value"] for p in data)[len(data) // 2]
+            return min(prices) * 0.5 < median < max(prices) * 2
+
         configs = []
         for i, col in enumerate(result.columns):
-            data = _ta_col_to_data(result[col], times)
+            data = _pta_points(result[col], times)
             if not data:
                 continue
-
-            col_lower = col.lower()
-            is_hist = "hist" in col_lower or col_lower.endswith("h")
-
-            if is_hist:
-                opts = {"color": "#26a69a", "priceLineVisible": False, "lastValueVisible": False}
-                config = {"type": "Histogram", "data": data, "options": opts}
+            col_pane = pane if pane or looks_like_price(data) else 1
+            if _HISTOGRAM_COLUMN.match(str(col)):
+                config = _series("Histogram", data, {"color": UP_COLOR, **_QUIET}, {})
             else:
                 opts = {
-                    "color": colors[i % len(colors)],
+                    "color": _PALETTE[i % len(_PALETTE)],
                     "lineWidth": 1 if len(result.columns) > 1 else 2,
+                    "title": str(col),
                     "priceLineVisible": False,
                     "lastValueVisible": i == 0,
                 }
-                config = {"type": "Line", "data": data, "options": opts}
-
-            if is_oscillator:
-                config["options"]["priceScaleId"] = scale_id
-                config["priceScale"] = {"scaleMargins": {"top": 0.75, "bottom": 0.0}}
-
+                config = _series("Line", data, opts, {})
+            if col_pane:
+                config["pane"] = col_pane
             configs.append(config)
-
         return configs
 
     @staticmethod
-    def pta_rsi(df, length=14, time_column="date", **options):
-        """RSI (Relative Strength Index) on a separate 0-100 scale.
-
-        Includes overbought (70) and oversold (30) reference lines.
-        """
-        pta_mod = _require_pandas_ta()
-        pdf = _ensure_pandas_df(df)
-        times = _extract_times(pdf, time_column)
-        ohlcv = _ohlcv_series(pdf)
-
-        result = pta_mod.rsi(ohlcv["close"], length=length)
-        if result is None:
-            raise ValueError("pandas-ta RSI returned None - check DataFrame has enough rows.")
-
-        data = _ta_col_to_data(result, times)
-        defaults = {
-            "color": "#7B1FA2",
-            "lineWidth": 2,
-            "priceScaleId": "pta_rsi",
-            "priceLineVisible": False,
-            "lastValueVisible": True,
-        }
-        defaults.update(options)
-        return {
-            "type": "Line",
-            "data": data,
-            "options": defaults,
-            "priceScale": {"scaleMargins": {"top": 0.75, "bottom": 0.0}},
-            "price_lines": [
-                {"price": 70, "color": "rgba(239,83,80,0.5)", "lineWidth": 1, "lineStyle": 2, "axisLabelVisible": True, "title": "OB"},
-                {"price": 30, "color": "rgba(38,166,154,0.5)", "lineWidth": 1, "lineStyle": 2, "axisLabelVisible": True, "title": "OS"},
+    def pta_rsi(df, length=14, time_column="date", pane=1, **options):
+        """RSI (Relative Strength Index) in its own pane, with overbought (70) / oversold (30) lines."""
+        pta, _, times, ohlcv = _pta_input(df, time_column)
+        result = _pta_check(pta.rsi(ohlcv["close"], length=length), "RSI")
+        defaults = {"color": "#7B1FA2", "lineWidth": 2, "title": f"RSI {length}", "priceLineVisible": False}
+        return _series(
+            "Line", _pta_points(result, times), defaults, options,
+            pane=pane,
+            price_lines=[
+                _guide_line(70, "rgba(239,83,80,0.5)", "OB"),
+                _guide_line(30, "rgba(38,166,154,0.5)", "OS"),
             ],
-        }
+        )
 
     @staticmethod
-    def pta_macd(df, fast=12, slow=26, signal=9, time_column="date"):
-        """MACD with histogram (green/red bars) + MACD line + signal line.
+    def pta_macd(df, fast=12, slow=26, signal=9, time_column="date", pane=1):
+        """MACD in its own pane: green/red histogram + MACD line + signal line.
 
         Returns list[dict] with 3 series configs.
         """
-        pta_mod = _require_pandas_ta()
-        pdf = _ensure_pandas_df(df)
-        times = _extract_times(pdf, time_column)
-        ohlcv = _ohlcv_series(pdf)
+        pta, _, times, ohlcv = _pta_input(df, time_column)
+        result = _pta_check(pta.macd(ohlcv["close"], fast=fast, slow=slow, signal=signal), "MACD")
 
-        result = pta_mod.macd(ohlcv["close"], fast=fast, slow=slow, signal=signal)
-        if result is None:
-            raise ValueError("pandas-ta MACD returned None - check DataFrame has enough rows.")
+        hist = _pta_points(result[_pta_column(result, "MACDh_")], times)
+        for point in hist:
+            point["color"] = UP_COLOR if point["value"] >= 0 else DOWN_COLOR
 
-        # Find columns by prefix
-        macd_col = next(c for c in result.columns if c.startswith("MACD_"))
-        hist_col = next(c for c in result.columns if c.startswith("MACDh_"))
-        signal_col = next(c for c in result.columns if c.startswith("MACDs_"))
-
-        scale_cfg = {"scaleMargins": {"top": 0.75, "bottom": 0.0}}
-
-        # Histogram with per-bar green/red
-        hist_data = []
-        for point in _ta_col_to_data(result[hist_col], times):
-            point["color"] = "#26a69a" if point["value"] >= 0 else "#ef5350"
-            hist_data.append(point)
-
-        configs = [
-            {
-                "type": "Histogram",
-                "data": hist_data,
-                "options": {"priceScaleId": "pta_macd", "priceLineVisible": False, "lastValueVisible": False},
-                "priceScale": scale_cfg,
-            },
-            {
-                "type": "Line",
-                "data": _ta_col_to_data(result[macd_col], times),
-                "options": {"color": "#2962FF", "lineWidth": 2, "priceScaleId": "pta_macd", "priceLineVisible": False, "lastValueVisible": True},
-                "priceScale": scale_cfg,
-            },
-            {
-                "type": "Line",
-                "data": _ta_col_to_data(result[signal_col], times),
-                "options": {"color": "#FF6D00", "lineWidth": 1, "priceScaleId": "pta_macd", "priceLineVisible": False, "lastValueVisible": False},
-                "priceScale": scale_cfg,
-            },
+        return [
+            _series("Histogram", hist, _QUIET, {}, pane=pane),
+            _series(
+                "Line", _pta_points(result[_pta_column(result, "MACD_")], times),
+                {"color": "#2962FF", "lineWidth": 2, "title": "MACD", "priceLineVisible": False}, {},
+                pane=pane,
+            ),
+            _series(
+                "Line", _pta_points(result[_pta_column(result, "MACDs_")], times),
+                {"color": "#FF6D00", "lineWidth": 1, "title": "Signal", **_QUIET}, {},
+                pane=pane,
+            ),
         ]
-        return configs
 
     @staticmethod
     def pta_bbands(df, length=20, std=2.0, column="close", time_column="date"):
-        """Bollinger Bands (upper/middle/lower) overlaid on price scale.
+        """Bollinger Bands (upper/middle/lower) overlaid on the price chart.
 
         Returns list[dict] with 3 series configs.
         """
-        pta_mod = _require_pandas_ta()
-        pdf = _ensure_pandas_df(df)
-        times = _extract_times(pdf, time_column)
-        ohlcv = _ohlcv_series(pdf)
-
-        col_key = column.lower()
-        close_s = ohlcv.get(col_key, ohlcv.get("close"))
-        result = pta_mod.bbands(close_s, length=length, std=std)
-        if result is None:
-            raise ValueError("pandas-ta BBands returned None - check DataFrame has enough rows.")
-
-        # Find columns by prefix (handles float formatting of std)
-        bbl_col = next(c for c in result.columns if c.startswith("BBL_"))
-        bbm_col = next(c for c in result.columns if c.startswith("BBM_"))
-        bbu_col = next(c for c in result.columns if c.startswith("BBU_"))
-
+        pta, pdf, times, _ = _pta_input(df, time_column)
+        result = _pta_check(pta.bbands(pdf[_find_column(pdf, column)].astype(float), length=length, std=std), "BBands")
+        band = {"color": "rgba(33, 150, 243, 0.6)", "lineWidth": 1, "lineStyle": 2, **_QUIET}
         return [
-            {
-                "type": "Line",
-                "data": _ta_col_to_data(result[bbu_col], times),
-                "options": {"color": "rgba(33, 150, 243, 0.6)", "lineWidth": 1, "lineStyle": 2, "priceLineVisible": False, "lastValueVisible": False},
-            },
-            {
-                "type": "Line",
-                "data": _ta_col_to_data(result[bbm_col], times),
-                "options": {"color": "rgba(33, 150, 243, 1.0)", "lineWidth": 1, "priceLineVisible": False, "lastValueVisible": False},
-            },
-            {
-                "type": "Line",
-                "data": _ta_col_to_data(result[bbl_col], times),
-                "options": {"color": "rgba(33, 150, 243, 0.6)", "lineWidth": 1, "lineStyle": 2, "priceLineVisible": False, "lastValueVisible": False},
-            },
+            _series("Line", _pta_points(result[_pta_column(result, "BBU_")], times), band, {}),
+            _series(
+                "Line", _pta_points(result[_pta_column(result, "BBM_")], times),
+                {"color": "rgba(33, 150, 243, 1.0)", "lineWidth": 1, "title": f"BB {length}", **_QUIET}, {},
+            ),
+            _series("Line", _pta_points(result[_pta_column(result, "BBL_")], times), band, {}),
         ]
 
     @staticmethod
-    def pta_stoch(df, k=14, d=3, smooth_k=3, time_column="date"):
-        """Stochastic Oscillator (%K and %D) on a separate 0-100 scale.
+    def pta_stoch(df, k=14, d=3, smooth_k=3, time_column="date", pane=1):
+        """Stochastic Oscillator (%K and %D) in its own pane, with overbought (80) / oversold (20) lines.
 
-        Includes overbought (80) and oversold (20) reference lines.
         Returns list[dict] with 2 series configs.
         """
-        pta_mod = _require_pandas_ta()
-        pdf = _ensure_pandas_df(df)
-        times = _extract_times(pdf, time_column)
-        ohlcv = _ohlcv_series(pdf)
-
-        result = pta_mod.stoch(ohlcv["high"], ohlcv["low"], ohlcv["close"], k=k, d=d, smooth_k=smooth_k)
-        if result is None:
-            raise ValueError("pandas-ta Stochastic returned None - check DataFrame has enough rows.")
-
-        k_col = next(c for c in result.columns if c.startswith("STOCHk_"))
-        d_col = next(c for c in result.columns if c.startswith("STOCHd_"))
-
-        scale_cfg = {"scaleMargins": {"top": 0.75, "bottom": 0.0}}
+        pta, _, times, ohlcv = _pta_input(df, time_column)
+        result = _pta_check(
+            pta.stoch(ohlcv["high"], ohlcv["low"], ohlcv["close"], k=k, d=d, smooth_k=smooth_k), "Stochastic"
+        )
         return [
-            {
-                "type": "Line",
-                "data": _ta_col_to_data(result[k_col], times),
-                "options": {"color": "#2962FF", "lineWidth": 2, "priceScaleId": "pta_stoch", "priceLineVisible": False, "lastValueVisible": True},
-                "priceScale": scale_cfg,
-                "price_lines": [
-                    {"price": 80, "color": "rgba(239,83,80,0.4)", "lineWidth": 1, "lineStyle": 2, "axisLabelVisible": True, "title": "OB"},
-                    {"price": 20, "color": "rgba(38,166,154,0.4)", "lineWidth": 1, "lineStyle": 2, "axisLabelVisible": True, "title": "OS"},
+            _series(
+                "Line", _pta_points(result[_pta_column(result, "STOCHk_")], times),
+                {"color": "#2962FF", "lineWidth": 2, "title": "%K", "priceLineVisible": False}, {},
+                pane=pane,
+                price_lines=[
+                    _guide_line(80, "rgba(239,83,80,0.4)", "OB"),
+                    _guide_line(20, "rgba(38,166,154,0.4)", "OS"),
                 ],
-            },
-            {
-                "type": "Line",
-                "data": _ta_col_to_data(result[d_col], times),
-                "options": {"color": "#FF6D00", "lineWidth": 1, "priceScaleId": "pta_stoch", "priceLineVisible": False, "lastValueVisible": False},
-                "priceScale": scale_cfg,
-            },
+            ),
+            _series(
+                "Line", _pta_points(result[_pta_column(result, "STOCHd_")], times),
+                {"color": "#FF6D00", "lineWidth": 1, "title": "%D", **_QUIET}, {},
+                pane=pane,
+            ),
         ]
 
     @staticmethod
-    def pta_atr(df, length=14, time_column="date", **options):
-        """Average True Range on a separate scale."""
-        pta_mod = _require_pandas_ta()
-        pdf = _ensure_pandas_df(df)
-        times = _extract_times(pdf, time_column)
-        ohlcv = _ohlcv_series(pdf)
-
-        result = pta_mod.atr(ohlcv["high"], ohlcv["low"], ohlcv["close"], length=length)
-        if result is None:
-            raise ValueError("pandas-ta ATR returned None - check DataFrame has enough rows.")
-
-        data = _ta_col_to_data(result, times)
-        defaults = {
-            "color": "#F57F17",
-            "lineWidth": 2,
-            "priceScaleId": "pta_atr",
-            "priceLineVisible": False,
-            "lastValueVisible": True,
-        }
-        defaults.update(options)
-        return {
-            "type": "Line",
-            "data": data,
-            "options": defaults,
-            "priceScale": {"scaleMargins": {"top": 0.75, "bottom": 0.0}},
-        }
+    def pta_atr(df, length=14, time_column="date", pane=1, **options):
+        """Average True Range in its own pane."""
+        pta, _, times, ohlcv = _pta_input(df, time_column)
+        result = _pta_check(pta.atr(ohlcv["high"], ohlcv["low"], ohlcv["close"], length=length), "ATR")
+        defaults = {"color": "#F57F17", "lineWidth": 2, "title": f"ATR {length}", "priceLineVisible": False}
+        return _series("Line", _pta_points(result, times), defaults, options, pane=pane)
 
     @staticmethod
-    def pta_adx(df, length=14, time_column="date", **options):
-        """Average Directional Index on a separate 0-100 scale.
-
-        Includes a trend threshold line at 25.
-        """
-        pta_mod = _require_pandas_ta()
-        pdf = _ensure_pandas_df(df)
-        times = _extract_times(pdf, time_column)
-        ohlcv = _ohlcv_series(pdf)
-
-        result = pta_mod.adx(ohlcv["high"], ohlcv["low"], ohlcv["close"], length=length)
-        if result is None:
-            raise ValueError("pandas-ta ADX returned None - check DataFrame has enough rows.")
-
-        adx_col = next(c for c in result.columns if c.startswith("ADX_"))
-        data = _ta_col_to_data(result[adx_col], times)
-
-        defaults = {
-            "color": "#00BCD4",
-            "lineWidth": 2,
-            "priceScaleId": "pta_adx",
-            "priceLineVisible": False,
-            "lastValueVisible": True,
-        }
-        defaults.update(options)
-        return {
-            "type": "Line",
-            "data": data,
-            "options": defaults,
-            "priceScale": {"scaleMargins": {"top": 0.75, "bottom": 0.0}},
-            "price_lines": [
-                {"price": 25, "color": "rgba(0,188,212,0.4)", "lineWidth": 1, "lineStyle": 2, "axisLabelVisible": True, "title": "Trend"},
-            ],
-        }
+    def pta_adx(df, length=14, time_column="date", pane=1, **options):
+        """Average Directional Index in its own pane, with a trend threshold line at 25."""
+        pta, _, times, ohlcv = _pta_input(df, time_column)
+        result = _pta_check(pta.adx(ohlcv["high"], ohlcv["low"], ohlcv["close"], length=length), "ADX")
+        defaults = {"color": "#00BCD4", "lineWidth": 2, "title": f"ADX {length}", "priceLineVisible": False}
+        return _series(
+            "Line", _pta_points(result[_pta_column(result, "ADX_")], times), defaults, options,
+            pane=pane,
+            price_lines=[_guide_line(25, "rgba(0,188,212,0.4)", "Trend")],
+        )
 
     @staticmethod
-    def pta_obv(df, time_column="date", **options):
-        """On-Balance Volume on a separate scale."""
-        pta_mod = _require_pandas_ta()
-        pdf = _ensure_pandas_df(df)
-        times = _extract_times(pdf, time_column)
-        ohlcv = _ohlcv_series(pdf)
-
-        result = pta_mod.obv(ohlcv["close"], ohlcv["volume"])
-        if result is None:
-            raise ValueError("pandas-ta OBV returned None - check DataFrame has enough rows.")
-
-        data = _ta_col_to_data(result, times)
+    def pta_obv(df, time_column="date", pane=1, **options):
+        """On-Balance Volume in its own pane."""
+        pta, _, times, ohlcv = _pta_input(df, time_column)
+        result = _pta_check(pta.obv(ohlcv["close"], ohlcv["volume"]), "OBV")
         defaults = {
-            "color": "#26a69a",
-            "lineWidth": 2,
-            "priceScaleId": "pta_obv",
-            "priceLineVisible": False,
-            "lastValueVisible": True,
+            "color": UP_COLOR, "lineWidth": 2, "title": "OBV",
+            "priceFormat": {"type": "volume"}, "priceLineVisible": False,
         }
-        defaults.update(options)
-        return {
-            "type": "Line",
-            "data": data,
-            "options": defaults,
-            "priceScale": {"scaleMargins": {"top": 0.75, "bottom": 0.0}},
-        }
+        return _series("Line", _pta_points(result, times), defaults, options, pane=pane)
 
     @staticmethod
     def pta_supertrend(df, length=7, multiplier=3.0, time_column="date", **options):
-        """Supertrend overlaid on the price chart with green/red coloring."""
-        pta_mod = _require_pandas_ta()
-        pdf = _ensure_pandas_df(df)
-        times = _extract_times(pdf, time_column)
-        ohlcv = _ohlcv_series(pdf)
-
-        result = pta_mod.supertrend(ohlcv["high"], ohlcv["low"], ohlcv["close"], length=length, multiplier=multiplier)
-        if result is None:
-            raise ValueError("pandas-ta Supertrend returned None - check DataFrame has enough rows.")
-
-        st_col = next(c for c in result.columns if c.startswith("SUPERT_"))
-        dir_col = next(c for c in result.columns if c.startswith("SUPERTd_"))
-
-        data = []
-        for i in range(len(result)):
-            if i >= len(times):
-                break
-            v = _safe_float(result[st_col].iloc[i])
-            if v is None:
-                continue
-            direction = result[dir_col].iloc[i]
-            if direction != direction:  # NaN check
-                continue
-            color = "#26a69a" if direction > 0 else "#ef5350"
-            data.append({"time": times[i], "value": v, "color": color})
-
-        defaults = {
-            "lineWidth": 2,
-            "priceLineVisible": False,
-            "lastValueVisible": True,
-        }
-        defaults.update(options)
-        return {"type": "Line", "data": data, "options": defaults}
+        """Supertrend overlaid on the price chart, green in uptrends and red in downtrends."""
+        pta, _, times, ohlcv = _pta_input(df, time_column)
+        result = _pta_check(
+            pta.supertrend(ohlcv["high"], ohlcv["low"], ohlcv["close"], length=length, multiplier=multiplier),
+            "Supertrend",
+        )
+        values = [_safe_float(v) for v in result[_pta_column(result, "SUPERT_")]]
+        directions = [_safe_float(v) for v in result[_pta_column(result, "SUPERTd_")]]
+        data = [
+            {"time": t, "value": v, "color": UP_COLOR if d > 0 else DOWN_COLOR}
+            for t, v, d in zip(times, values, directions)
+            if t is not None and v is not None and d is not None
+        ]
+        defaults = {"lineWidth": 2, "title": "Supertrend", "priceLineVisible": False}
+        return _series("Line", data, defaults, options)
 
     @staticmethod
-    def pta_vwap(df, time_column="date", **options):
-        """Volume Weighted Average Price overlaid on the price chart."""
-        pta_mod = _require_pandas_ta()
-        pdf = _ensure_pandas_df(df)
-        times = _extract_times(pdf, time_column)
-        ohlcv = _ohlcv_series(pdf)
+    def pta_vwap(df, anchor="D", time_column="date", **options):
+        """Volume Weighted Average Price overlaid on the price chart.
 
+        `anchor` is the pandas period VWAP resets on: "D" (daily, for intraday data),
+        "W" (weekly) or "M" (monthly, useful for daily bars - a daily VWAP on daily
+        bars is just the typical price).
+        """
+        pta, _, times, ohlcv = _pta_input(df, time_column)
         if "volume" not in ohlcv:
             raise ValueError("VWAP requires a 'volume' column in the DataFrame.")
-
-        # VWAP requires a DatetimeIndex - set it if not already
-        import pandas as pd
-        if not isinstance(pdf.index, pd.DatetimeIndex):
-            for candidate in (time_column, "Date", "date", "datetime", "timestamp", "time"):
-                if candidate in pdf.columns:
-                    pdf = pdf.set_index(pd.DatetimeIndex(pdf[candidate]))
-                    break
-
-        ohlcv = _ohlcv_series(pdf)
-        result = pta_mod.vwap(ohlcv["high"], ohlcv["low"], ohlcv["close"], ohlcv["volume"])
-        if result is None:
-            raise ValueError("pandas-ta VWAP returned None - check DataFrame has enough rows.")
-
-        data = _ta_col_to_data(result, times)
-        defaults = {
-            "color": "#E91E63",
-            "lineWidth": 2,
-            "priceLineVisible": False,
-            "lastValueVisible": True,
-        }
-        defaults.update(options)
-        return {"type": "Line", "data": data, "options": defaults}
+        result = _pta_check(
+            pta.vwap(ohlcv["high"], ohlcv["low"], ohlcv["close"], ohlcv["volume"], anchor=anchor), "VWAP"
+        )
+        defaults = {"color": "#E91E63", "lineWidth": 2, "title": f"VWAP {anchor}", "priceLineVisible": False}
+        return _series("Line", _pta_points(result, times), defaults, options)
 
     @staticmethod
     def pta_ichimoku(df, tenkan=9, kijun=26, senkou=52, time_column="date"):
-        """Ichimoku Cloud (5 lines) overlaid on the price chart.
+        """Ichimoku Cloud overlaid on the price chart.
 
         Returns list[dict] with 5 series configs:
         Tenkan-sen, Kijun-sen, Chikou Span, Senkou Span A, Senkou Span B.
+        The two Senkou spans extend `kijun` bars past the last candle.
         """
-        pta_mod = _require_pandas_ta()
-        pdf = _ensure_pandas_df(df)
-        times = _extract_times(pdf, time_column)
-        ohlcv = _ohlcv_series(pdf)
+        import pandas as pd
 
-        # ichimoku returns a tuple: (ichimoku_df, spans_df)
-        result = pta_mod.ichimoku(ohlcv["high"], ohlcv["low"], ohlcv["close"], tenkan=tenkan, kijun=kijun, senkou=senkou)
-        if result is None or result[0] is None:
-            raise ValueError("pandas-ta Ichimoku returned None - check DataFrame has enough rows.")
+        pta, _, times, ohlcv = _pta_input(df, time_column)
+        ich_df, spans_df = _pta_check(
+            pta.ichimoku(ohlcv["high"], ohlcv["low"], ohlcv["close"], tenkan=tenkan, kijun=kijun, senkou=senkou),
+            "Ichimoku",
+        )
 
-        ich_df, spans_df = result
+        def line(series, times, color, title):
+            return _series("Line", _pta_points(series, times), {"color": color, "lineWidth": 1, "title": title, **_QUIET}, {})
 
-        # Find columns by prefix
-        its_col = next((c for c in ich_df.columns if c.startswith("ITS_")), None)
-        iks_col = next((c for c in ich_df.columns if c.startswith("IKS_")), None)
-        ics_col = next((c for c in ich_df.columns if c.startswith("ICS_")), None)
-        isa_col = next((c for c in spans_df.columns if c.startswith("ISA_")), None)
-        isb_col = next((c for c in spans_df.columns if c.startswith("ISB_")), None)
+        # Senkou spans: in-range values followed by the forward projection
+        span_a = pd.concat([ich_df[_pta_column(ich_df, "ISA_")], spans_df[_pta_column(spans_df, "ISA_")]])
+        span_b = pd.concat([ich_df[_pta_column(ich_df, "ISB_")], spans_df[_pta_column(spans_df, "ISB_")]])
+        span_times = _convert_times(span_a.index.to_list())
 
-        configs = []
-
-        # Tenkan-sen (conversion line)
-        if its_col:
-            configs.append({
-                "type": "Line",
-                "data": _ta_col_to_data(ich_df[its_col], times),
-                "options": {"color": "#2962FF", "lineWidth": 1, "priceLineVisible": False, "lastValueVisible": False},
-            })
-
-        # Kijun-sen (base line)
-        if iks_col:
-            configs.append({
-                "type": "Line",
-                "data": _ta_col_to_data(ich_df[iks_col], times),
-                "options": {"color": "#B71C1C", "lineWidth": 1, "priceLineVisible": False, "lastValueVisible": False},
-            })
-
-        # Chikou Span (lagging span)
-        if ics_col:
-            configs.append({
-                "type": "Line",
-                "data": _ta_col_to_data(ich_df[ics_col], times),
-                "options": {"color": "#26a69a", "lineWidth": 1, "priceLineVisible": False, "lastValueVisible": False},
-            })
-
-        # Senkou Span A & B (cloud) - these are forward-shifted, build their own times
-        if spans_df is not None and (isa_col or isb_col):
-            span_times = [
-                v.strftime("%Y-%m-%d") if hasattr(v, "strftime") else str(v)
-                for v in spans_df.index
-            ]
-            if isa_col:
-                configs.append({
-                    "type": "Line",
-                    "data": _ta_col_to_data(spans_df[isa_col], span_times),
-                    "options": {"color": "rgba(38,166,154,0.5)", "lineWidth": 1, "lineStyle": 1, "priceLineVisible": False, "lastValueVisible": False},
-                })
-            if isb_col:
-                configs.append({
-                    "type": "Line",
-                    "data": _ta_col_to_data(spans_df[isb_col], span_times),
-                    "options": {"color": "rgba(239,83,80,0.5)", "lineWidth": 1, "lineStyle": 1, "priceLineVisible": False, "lastValueVisible": False},
-                })
-
-        return configs
+        return [
+            line(ich_df[_pta_column(ich_df, "ITS_")], times, "#2962FF", "Tenkan"),
+            line(ich_df[_pta_column(ich_df, "IKS_")], times, "#B71C1C", "Kijun"),
+            line(ich_df[_pta_column(ich_df, "ICS_")], times, UP_COLOR, "Chikou"),
+            line(span_a, span_times, "rgba(38,166,154,0.6)", "Span A"),
+            line(span_b, span_times, "rgba(239,83,80,0.6)", "Span B"),
+        ]
 
     # ------------------------------------------------------------------
     # Markers, price lines, themes
     # ------------------------------------------------------------------
 
     @staticmethod
-    def markers(time, position="belowBar", shape="arrowUp", color="#2196F3", text="", size=1):
-        """Create a single marker dict.
+    def marker(time, position="belowBar", shape="arrowUp", color="#2196F3", text="", size=1):
+        """Create a single series marker dict.
 
         Args:
-            time: Time string (e.g. "2024-01-15") or unix timestamp
+            time: Time of an existing data point in the series (e.g. "2024-01-15",
+                or unix seconds for intraday data). Markers at other times are dropped.
             position: "belowBar", "aboveBar", or "inBar"
             shape: "arrowUp", "arrowDown", "circle", "square"
             color: Marker color
@@ -959,6 +689,8 @@ class LightweightChartWidget(anywidget.AnyWidget):
             "text": text,
             "size": size,
         }
+
+    markers = marker  # backwards-compatible alias
 
     @staticmethod
     def price_line(price, color="#FF0000", line_width=1, line_style=2, title=""):
@@ -982,19 +714,20 @@ class LightweightChartWidget(anywidget.AnyWidget):
 
     @staticmethod
     def dark_theme():
-        """Return chart_options for a dark theme."""
+        """Return chart_options for a dark theme (TradingView's dark palette)."""
         return {
             "layout": {
-                "background": {"type": "solid", "color": "#1a1a2e"},
+                "background": {"type": "solid", "color": "#131722"},
                 "textColor": "#d1d4dc",
+                "panes": {"separatorColor": "#2a2e39"},
             },
             "grid": {
-                "vertLines": {"color": "rgba(42, 46, 57, 0.5)"},
-                "horzLines": {"color": "rgba(42, 46, 57, 0.5)"},
+                "vertLines": {"color": "rgba(42, 46, 57, 0.6)"},
+                "horzLines": {"color": "rgba(42, 46, 57, 0.6)"},
             },
-            "crosshair": {
-                "mode": 0,
-            },
+            "rightPriceScale": {"borderColor": "#2a2e39"},
+            "timeScale": {"borderColor": "#2a2e39"},
+            "crosshair": {"mode": 0},
         }
 
     @staticmethod
@@ -1004,12 +737,21 @@ class LightweightChartWidget(anywidget.AnyWidget):
             "layout": {
                 "background": {"type": "solid", "color": "#ffffff"},
                 "textColor": "#191919",
+                "panes": {"separatorColor": "#e0e3eb"},
             },
             "grid": {
                 "vertLines": {"color": "rgba(197, 203, 206, 0.5)"},
                 "horzLines": {"color": "rgba(197, 203, 206, 0.5)"},
             },
-            "crosshair": {
-                "mode": 0,
-            },
+            "rightPriceScale": {"borderColor": "#e0e3eb"},
+            "timeScale": {"borderColor": "#e0e3eb"},
+            "crosshair": {"mode": 0},
         }
+
+    @staticmethod
+    def theme(name):
+        """Return dark_theme() for "dark", light_theme() otherwise.
+
+        In marimo, follow the notebook theme with `W.theme(mo.app_meta().theme)`.
+        """
+        return LightweightChartWidget.dark_theme() if name == "dark" else LightweightChartWidget.light_theme()

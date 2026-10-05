@@ -8,7 +8,7 @@ import {
   BarSeries,
   BaselineSeries,
   HistogramSeries,
-} from "https://esm.sh/lightweight-charts@5.0";
+} from "https://esm.sh/lightweight-charts@5.2";
 
 const SERIES_TYPES = {
   Candlestick: CandlestickSeries,
@@ -19,48 +19,77 @@ const SERIES_TYPES = {
   Histogram: HistogramSeries,
 };
 
-function buildChart(el, model) {
+// Panes below the main price pane get this share of the height relative to it
+const SUB_PANE_STRETCH = 0.4;
+
+// Limit how often mouse/scroll events are sent to Python
+const CROSSHAIR_THROTTLE_MS = 100;
+const RANGE_DEBOUNCE_MS = 250;
+
+function throttle(fn, ms) {
+  let last = 0;
+  let timer = null;
+  return (arg) => {
+    clearTimeout(timer);
+    const wait = last + ms - Date.now();
+    if (wait <= 0) {
+      last = Date.now();
+      fn(arg);
+    } else {
+      // Trailing call so the final position is always sent
+      timer = setTimeout(() => {
+        last = Date.now();
+        fn(arg);
+      }, wait);
+    }
+  };
+}
+
+function debounce(fn, ms) {
+  let timer = null;
+  return (arg) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn(arg), ms);
+  };
+}
+
+function seriesColor(series) {
+  const o = series.options();
+  return o.color || o.lineColor || o.topLineColor || o.upColor || "";
+}
+
+function render({ model, el }) {
   const container = document.createElement("div");
   container.classList.add("lwc-container");
   el.appendChild(container);
 
-  const legendEl = document.createElement("div");
-  legendEl.classList.add("lwc-legend");
-  container.appendChild(legendEl);
-
-  const width = model.get("width") || undefined;
-  const height = model.get("height") || 400;
-  const chartOptions = model.get("chart_options") || {};
+  // The chart always auto-sizes to the container; width/height are set on the container
+  function applySize() {
+    const width = model.get("width");
+    container.style.width = width ? `${width}px` : "100%";
+    container.style.height = `${model.get("height") || 400}px`;
+  }
+  applySize();
 
   const chart = createChart(container, {
-    width,
-    height,
-    autoSize: !width,
-    ...chartOptions,
+    autoSize: true,
+    ...(model.get("chart_options") || {}),
   });
 
-  // Track created series for teardown and updates
-  let seriesInstances = [];
-
-  // Watermark plugin instance (v5 uses createTextWatermark)
+  // [{ series, config }] for every series currently on the chart
+  let seriesList = [];
   let watermarkInstance = null;
-
-  // Guard flag to prevent visible_range feedback loop
-  let updatingRangeFromPython = false;
+  let legends = [];
 
   function applyWatermark() {
     if (watermarkInstance) {
       watermarkInstance.detach();
       watermarkInstance = null;
     }
-
     const wm = model.get("watermark");
     if (!wm || !wm.text) return;
 
-    const pane = chart.panes()[0];
-    if (!pane) return;
-
-    watermarkInstance = createTextWatermark(pane, {
+    watermarkInstance = createTextWatermark(chart.panes()[0], {
       horzAlign: wm.horzAlign || "center",
       vertAlign: wm.vertAlign || "center",
       lines: [
@@ -75,220 +104,202 @@ function buildChart(el, model) {
     });
   }
 
-  function clearSeries() {
-    for (const s of seriesInstances) {
-      chart.removeSeries(s);
-    }
-    seriesInstances = [];
+  function applyVisibleRange() {
+    const vr = model.get("visible_range");
+    if (!vr || !vr.from || !vr.to) return;
+    // Skip ranges that came from this chart's own scrolling, to avoid snapping the view
+    const current = chart.timeScale().getVisibleRange();
+    if (current && current.from === vr.from && current.to === vr.to) return;
+    chart.timeScale().setVisibleRange(vr);
   }
 
   function renderSeries() {
-    clearSeries();
-    const seriesData = model.get("series_data") || [];
+    for (const { series } of seriesList) {
+      chart.removeSeries(series); // also removes panes left empty
+    }
+    seriesList = [];
 
-    for (const config of seriesData) {
+    for (const config of model.get("series_data") || []) {
       const SeriesType = SERIES_TYPES[config.type];
       if (!SeriesType) {
         console.warn(`Unknown series type: ${config.type}`);
         continue;
       }
 
-      const options = { ...(config.options || {}) };
-      const series = chart.addSeries(SeriesType, options);
-
-      // Apply price scale options if provided (e.g. for volume overlay)
+      // A pane index past the last pane creates a new pane
+      const series = chart.addSeries(SeriesType, config.options || {}, config.pane || 0);
       if (config.priceScale) {
         series.priceScale().applyOptions(config.priceScale);
       }
-
-      // Set data
       if (config.data && config.data.length > 0) {
         series.setData(config.data);
       }
-
-      // Apply markers to this series (v5: createSeriesMarkers)
       if (config.markers && config.markers.length > 0) {
-        const sorted = [...config.markers].sort((a, b) => {
-          if (a.time < b.time) return -1;
-          if (a.time > b.time) return 1;
-          return 0;
-        });
+        const sorted = [...config.markers].sort((a, b) => (a.time < b.time ? -1 : a.time > b.time ? 1 : 0));
         createSeriesMarkers(series, sorted);
       }
-
-      // Apply price lines to this series
-      if (config.price_lines) {
-        for (const pl of config.price_lines) {
-          series.createPriceLine(pl);
-        }
+      for (const pl of config.price_lines || []) {
+        series.createPriceLine(pl);
       }
-
-      seriesInstances.push(series);
+      seriesList.push({ series, config });
     }
 
-    // Fit content if requested
+    const panes = chart.panes();
+    panes.forEach((pane, i) => pane.setStretchFactor(i === 0 ? 1 : SUB_PANE_STRETCH));
+
     if (model.get("fit_content")) {
       chart.timeScale().fitContent();
     }
+    updateLegend(null);
+  }
 
-    // Apply visible range if set
-    const visRange = model.get("visible_range");
-    if (visRange && visRange.from && visRange.to) {
-      updatingRangeFromPython = true;
-      chart.timeScale().setVisibleRange(visRange);
-      updatingRangeFromPython = false;
+  // --- Legend: one per pane, showing hovered (or latest) values ---
+
+  function legendItem(series, config, data, isMain) {
+    const fmt = (v) => series.priceFormatter().format(v);
+    const item = document.createElement("span");
+    item.className = "lwc-legend-item";
+
+    const title = series.options().title;
+    if (title) {
+      const label = document.createElement("span");
+      label.className = "lwc-legend-title";
+      label.textContent = title;
+      item.appendChild(label);
     }
+
+    if ("close" in data) {
+      for (const k of ["open", "high", "low", "close"]) {
+        const v = document.createElement("span");
+        v.className = "lwc-val";
+        v.textContent = fmt(data[k]);
+        v.style.color = data.close >= data.open ? config.options?.upColor || "" : config.options?.downColor || "";
+        item.append(k[0].toUpperCase(), v, " ");
+      }
+    } else if ("value" in data) {
+      const v = document.createElement("span");
+      v.className = "lwc-val";
+      v.textContent = fmt(data.value);
+      v.style.color = data.color || seriesColor(series);
+      item.appendChild(v);
+    }
+    // Skip unlabeled secondary series (e.g. Bollinger outer bands) to keep the legend short
+    return title || isMain ? item : null;
   }
 
   function updateLegend(param) {
-    if (!param || !param.seriesData) {
-      legendEl.innerHTML = "";
-      return;
-    }
+    for (const legend of legends) legend.remove();
+    legends = [];
 
-    const parts = [];
-    for (const [series, data] of param.seriesData) {
-      if (!data) continue;
-      if ("close" in data) {
-        parts.push(
-          `<span class="lwc-legend-item">` +
-            `O<span class="lwc-val">${data.open.toFixed(2)}</span> ` +
-            `H<span class="lwc-val">${data.high.toFixed(2)}</span> ` +
-            `L<span class="lwc-val">${data.low.toFixed(2)}</span> ` +
-            `C<span class="lwc-val">${data.close.toFixed(2)}</span>` +
-            `</span>`
-        );
-      } else if ("value" in data) {
-        parts.push(
-          `<span class="lwc-legend-item">` +
-            `<span class="lwc-val">${data.value.toFixed(2)}</span>` +
-            `</span>`
-        );
+    const byPane = new Map();
+    seriesList.forEach(({ series, config }, i) => {
+      let data = param && param.time !== undefined ? param.seriesData.get(series) : null;
+      if (!param || param.time === undefined) {
+        const all = series.data();
+        data = all[all.length - 1];
       }
+      if (!data) return;
+      const item = legendItem(series, config, data, i === 0);
+      if (!item) return;
+      const pane = series.getPane();
+      if (!byPane.has(pane)) byPane.set(pane, []);
+      byPane.get(pane).push(item);
+    });
+
+    const top = container.getBoundingClientRect().top;
+    for (const [pane, items] of byPane) {
+      const paneEl = pane.getHTMLElement();
+      const legend = document.createElement("div");
+      legend.className = "lwc-legend";
+      legend.style.color = chart.options().layout.textColor;
+      legend.style.top = `${(paneEl ? paneEl.getBoundingClientRect().top - top : 0) + 6}px`;
+      legend.append(...items);
+      container.appendChild(legend);
+      legends.push(legend);
     }
-    legendEl.innerHTML = parts.join(" ");
   }
 
   // --- Events: JS -> Python ---
 
-  chart.subscribeCrosshairMove((param) => {
-    updateLegend(param);
-
-    if (!param || !param.time) {
-      return;
+  function eventPayload(param) {
+    const data = { time: param.time, series_values: [] };
+    for (const { series } of seriesList) {
+      const values = param.seriesData.get(series);
+      if (values) data.series_values.push({ ...values });
     }
-
-    const data = { time: param.time };
-    const values = [];
-    for (const [series, seriesData] of param.seriesData) {
-      if (seriesData) {
-        values.push({ ...seriesData });
-      }
-    }
-    data.series_values = values;
-
     if (param.point) {
       data.x = param.point.x;
       data.y = param.point.y;
     }
+    return data;
+  }
 
+  const sendCrosshair = throttle((data) => {
     model.set("crosshair_data", data);
     model.save_changes();
+  }, CROSSHAIR_THROTTLE_MS);
+
+  chart.subscribeCrosshairMove((param) => {
+    updateLegend(param);
+    if (param.time !== undefined) {
+      sendCrosshair(eventPayload(param));
+    }
   });
 
   chart.subscribeClick((param) => {
-    if (!param || !param.time) return;
-
-    const data = { time: param.time };
-    const values = [];
-    for (const [series, seriesData] of param.seriesData) {
-      if (seriesData) {
-        values.push({ ...seriesData });
-      }
-    }
-    data.series_values = values;
-
-    if (param.point) {
-      data.x = param.point.x;
-      data.y = param.point.y;
-    }
-
-    model.set("clicked_data", data);
+    if (param.time === undefined) return;
+    model.set("clicked_data", eventPayload(param));
     model.save_changes();
   });
 
-  // Send visible range changes back to Python (with guard to prevent feedback loop)
+  const sendRange = debounce((range) => {
+    const current = model.get("visible_range") || {};
+    if (current.from === range.from && current.to === range.to) return;
+    model.set("visible_range", { from: range.from, to: range.to });
+    model.save_changes();
+  }, RANGE_DEBOUNCE_MS);
+
   chart.timeScale().subscribeVisibleTimeRangeChange((range) => {
-    if (updatingRangeFromPython) return;
-    if (range) {
-      model.set("visible_range", { from: range.from, to: range.to });
-      model.save_changes();
-    }
+    if (range) sendRange(range);
   });
+
+  // Pane heights change when the chart resizes or a pane separator is dragged
+  const resizeObserver = new ResizeObserver(() => updateLegend(null));
+  resizeObserver.observe(container);
 
   // --- React to Python changes ---
 
-  model.on("change:series_data", () => {
-    renderSeries();
-    applyWatermark();
-  });
-
-  model.on("change:chart_options", () => {
-    const opts = model.get("chart_options") || {};
-    chart.applyOptions(opts);
-  });
-
-  model.on("change:width", () => {
-    const w = model.get("width");
-    if (w) {
-      chart.applyOptions({ width: w, autoSize: false });
-    } else {
-      chart.applyOptions({ autoSize: true });
-    }
-  });
-
-  model.on("change:height", () => {
-    chart.applyOptions({ height: model.get("height") || 400 });
-  });
-
-  model.on("change:watermark", () => {
-    applyWatermark();
-  });
-
-  model.on("change:fit_content", () => {
-    if (model.get("fit_content")) {
-      chart.timeScale().fitContent();
-    }
-  });
-
-  model.on("change:visible_range", () => {
-    const vr = model.get("visible_range");
-    if (vr && vr.from && vr.to) {
-      updatingRangeFromPython = true;
-      chart.timeScale().setVisibleRange(vr);
-      updatingRangeFromPython = false;
-    }
-  });
+  const handlers = {
+    "change:series_data": () => {
+      renderSeries();
+      applyWatermark();
+    },
+    "change:chart_options": () => {
+      chart.applyOptions(model.get("chart_options") || {});
+      updateLegend(null);
+    },
+    "change:width": applySize,
+    "change:height": applySize,
+    "change:watermark": applyWatermark,
+    "change:fit_content": () => {
+      if (model.get("fit_content")) chart.timeScale().fitContent();
+    },
+    "change:visible_range": applyVisibleRange,
+  };
+  for (const [event, handler] of Object.entries(handlers)) {
+    model.on(event, handler);
+  }
 
   // Initial render
   renderSeries();
   applyWatermark();
+  applyVisibleRange();
 
-  return chart;
-}
-
-function render({ model, el }) {
-  const chart = buildChart(el, model);
-
-  // Return cleanup function for teardown
   return () => {
-    model.off("change:series_data");
-    model.off("change:chart_options");
-    model.off("change:width");
-    model.off("change:height");
-    model.off("change:watermark");
-    model.off("change:fit_content");
-    model.off("change:visible_range");
+    for (const [event, handler] of Object.entries(handlers)) {
+      model.off(event, handler);
+    }
+    resizeObserver.disconnect();
     chart.remove();
   };
 }

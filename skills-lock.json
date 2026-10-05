@@ -4,12 +4,20 @@
     "anywidget-generator": {
       "source": "marimo-team/skills",
       "sourceType": "github",
+      "skillPath": "skills/anywidget/SKILL.md",
       "computedHash": "93a512dc9870809902459881640b041afe5fe460774e9b49a212d8d799922ab5"
+    },
+    "lightweight-charts": {
+      "source": "tradingview/lightweight-charts",
+      "sourceType": "github",
+      "skillPath": ".github/skills/lightweight-charts/SKILL.md",
+      "computedHash": "556e8b55913f51637d0c947175cf5ef102d3f291bf8e266d096eada6361f26c4"
     },
     "marimo-notebook": {
       "source": "marimo-team/skills",
       "sourceType": "github",
-      "computedHash": "17f16170d948dd845121a49263493b534588db66457c9c47b40ad3868923cba7"
+      "skillPath": "skills/marimo-notebook/SKILL.md",
+      "computedHash": "d843af038a49245369d9a91b8dda531a0d58882bc06623604b673cb144588edd"
     }
   }
 }

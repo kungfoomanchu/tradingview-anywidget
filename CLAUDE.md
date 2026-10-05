@@ -39,7 +39,7 @@ All DataFrame handling goes through `_time_values`, `_column_values`, `_line_poi
 
 - Columns are matched case-insensitively; missing columns raise `KeyError`.
 - A whole time column gets one format: `"YYYY-MM-DD"` if every value is midnight, otherwise unix seconds (wall-clock, timezone dropped). Lightweight Charts requires one time format per series and unique ascending times.
-- Missing values are dropped, never sent as `null`.
+- Missing values are dropped (or sent as time-only whitespace points with `gaps=True`), never sent as `null`.
 
 ## Gotchas
 
@@ -47,6 +47,9 @@ All DataFrame handling goes through `_time_values`, `_column_values`, `_line_poi
 - `localization.priceFormatter` replaces the format on every price axis in every pane (RSI, volume too), but `series.priceFormatter()` (used by the legend) ignores it; `chart.js` makes the legend follow it for plain price series. Prefer a per-series `price_format=W.number_format(...)` in examples.
 - Formatters can't cross the JSON boundary: Python sends `{"intl": "number"|"date", ...}` specs and `resolveChartOptions`/`resolveSeriesOptions` in `chart.js` build the functions.
 - In the demo, a `mo.ui.button` only runs its `on_click` if it's assigned to a variable (not created inline inside `mo.hstack`). Cells with buttons that call widget methods should depend on the widget object, not the `mo.ui.anywidget` wrapper, or they rerun on every mouse move.
+
+- `setCrosshairPosition()` fires no crosshair events, so code that sets it (sync groups, `set_crosshair`) updates the legend itself. Range changes from `setVisibleRange()` do fire, hence the echo guard in sync groups.
+- Whitespace points leave a slot but line/area/baseline series still join across them; `withLineGaps` in `chart.js` makes the segment transparent (a segment takes the color of its first point).
 
 ## Verifying changes
 

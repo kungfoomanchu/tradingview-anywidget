@@ -1,3 +1,4 @@
+import base64
 import datetime
 
 import numpy as np
@@ -347,3 +348,49 @@ def test_update_intraday_converts_to_unix_seconds(df):
 
 def test_image_watermark_detects_svg_bytes():
     assert W.image_watermark(b'<svg width="10" height="10"></svg>')["image"].startswith("data:image/svg+xml;base64,")
+
+
+# --- Gaps, crosshair commands, screenshots, horizontal axis ---
+
+
+def test_gaps_keep_missing_values_as_whitespace(df):
+    holes = df.head(5).copy()
+    holes.loc[2, "Close"] = np.nan
+    assert len(W.line(holes)["data"]) == 4
+    data = W.line(holes, gaps=True)["data"]
+    assert len(data) == 5 and data[2] == {"time": "2024-01-03"}
+    candles = W.candlestick(holes, gaps=True)["data"]
+    assert candles[2] == {"time": "2024-01-03"} and "close" in candles[1]
+
+
+def test_crosshair_commands_convert_time(df, monkeypatch):
+    chart = W(series_data=[W.line(df.head(3))])
+    sent = []
+    monkeypatch.setattr(chart, "send", sent.append)
+    chart.set_crosshair(datetime.date(2024, 1, 2))
+    chart.clear_crosshair()
+    assert sent == [
+        {"command": "setCrosshair", "series": 0, "time": "2024-01-02"},
+        {"command": "clearCrosshair"},
+    ]
+
+
+def test_screenshot_png_and_save(tmp_path, monkeypatch):
+    chart = W()
+    sent = []
+    monkeypatch.setattr(chart, "send", sent.append)
+    assert chart.screenshot_png() is None
+    chart.screenshot = "data:image/png;base64,old"
+    path = tmp_path / "chart.png"
+    chart.save_screenshot(path)
+    assert sent == [{"command": "screenshot", "download": None}]
+    assert chart.screenshot == ""  # cleared so the next one counts as a change
+    png = b"\x89PNG\r\n\x1a\n"
+    chart.screenshot = "data:image/png;base64," + base64.b64encode(png).decode()  # from the browser
+    assert path.read_bytes() == png
+
+
+def test_x_axis_is_validated():
+    assert W(x_axis="number").x_axis == "number"
+    with pytest.raises(Exception):
+        W(x_axis="log")

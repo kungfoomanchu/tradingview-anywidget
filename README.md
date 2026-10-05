@@ -50,7 +50,7 @@ All helpers take a pandas or polars DataFrame:
 - **Columns** are matched case-insensitively (`Close` or `close`); a missing column raises `KeyError`.
 - **Times** come from `time_column=` (default `"date"`), any `time`/`date`/`datetime`/`timestamp` column, or a pandas `DatetimeIndex`.
   Daily data is sent as `"YYYY-MM-DD"`; intraday data as unix seconds, shown in the data's own wall-clock time.
-- **Missing values** (NaN, None) are skipped.
+- **Missing values** (NaN, None) are skipped, or kept as gaps with `gaps=True` (candlestick, bar, line, area, baseline, histogram).
 - **Extra keyword arguments** are passed through as Lightweight Charts series options, in snake_case or camelCase, e.g. `W.line(df, color="#f00", title="Close", line_style="dashed")`.
   Numbered options also take names: `line_style` (`"solid"`, `"dotted"`, `"dashed"`, ...), `line_type` (`"simple"`, `"steps"`, `"curved"`), `last_price_animation`.
 
@@ -93,7 +93,10 @@ options instead: `W.number_format(style="currency", currency="EUR")` (per series
 `W.date_format(...)` for the crosshair time label and time-axis ticks.
 
 Other widget arguments: `watermark=` takes `{"text": ...}`, `W.image_watermark(path_or_url)`
-or a list of them, and `pane_heights=[3, 1, 1]` sets relative pane heights.
+or a list of them; `pane_heights=[3, 1, 1]` sets relative pane heights;
+`sync_group="name"` links the crosshair and scrolling of every chart with that name;
+`x_axis="number"` (e.g. option strikes) or `"yield_curve"` (maturities in months)
+replaces the time axis.
 
 ### Events
 
@@ -123,7 +126,11 @@ chart.update({"time": "2024-06-03", "open": 1, "high": 2, "low": 1, "close": 2})
 ```
 
 `chart.update(point, series=0)` adds a bar or replaces the latest one without
-redrawing the chart. Click a name in the legend to hide or show that series.
+redrawing the chart. `chart.set_crosshair(time)` / `chart.clear_crosshair()` move the
+crosshair. `chart.take_screenshot(download="chart.png")` saves a PNG through the
+browser and sends it back to Python (`chart.screenshot_png()`);
+`chart.save_screenshot(path)` writes it to a file. Click a name in the legend to hide
+or show that series.
 
 ## Lightweight Charts API Coverage
 
@@ -134,22 +141,26 @@ redrawing the chart. Click a name in the legend to hide or show that series.
 | Category | Wrapped | Available | Coverage |
 |----------|---------|-----------|----------|
 | Series Types | 6 | 6 | **100%** |
-| Chart Methods | ~10 | 15+ | ~65% |
+| Chart Methods | ~13 | 15+ | ~85% |
 | Series Methods | ~8 | 20+ | ~40% |
-| Time Scale | ~10 | 15+ | ~65% |
+| Time Scale | ~11 | 15+ | ~70% |
 | Price Scale | 5 | 6 | ~85% |
 | Pane API | 4 | 15+ | ~25% |
 | Events | 5 | 5+ | ~95% |
-| Chart Options | 10 groups | 20+ | ~55% |
+| Chart Options | 11 groups | 20+ | ~60% |
 | Series Options | ~30 | 60+ | ~50% |
 | Plugins | 3 | 4+ | ~75% |
 
-**Overall: ~50%** of the lightweight-charts v5 API surface (v5.2).
+**Overall: ~55%** of the lightweight-charts v5 API surface (v5.2).
 
 ### What IS wrapped
 
 - **All 6 series types**: Candlestick, Line, Area, Bar, Baseline, Histogram
-- **Chart creation**: `createChart()` with width/height/autoSize
+- **Chart creation**: `createChart()` with width/height/autoSize, `createOptionsChart()` (`x_axis="number"`) and `createYieldCurveChart()` (`x_axis="yield_curve"`)
+- **Screenshots**: `takeScreenshot()` (with the HTML legends drawn in) via `chart.take_screenshot()`, `chart.screenshot_png()`, `chart.save_screenshot()`
+- **Synced charts**: crosshair (`setCrosshairPosition()` / `clearCrosshairPosition()`) and visible range shared in the browser between charts with the same `sync_group`; `chart.set_crosshair()` / `chart.clear_crosshair()` from Python
+- **Whitespace data**: `gaps=True` keeps missing rows as time-only points (line, area and baseline series also break their line at the gap)
+- **Data conflation** (v5.2): `W.time_scale(enable_conflation=True, min_bar_spacing=...)` for very long series
 - **Dynamic updates**: `applyOptions()` for chart options, series add/remove/setData
 - **Panes**: series `pane` index (`addSeries(type, options, paneIndex)`), pane sizing (`setStretchFactor`, automatic or via `pane_heights`), per-pane legends. Panes follow `series_data`, so removing, adding or reordering panes is done by changing series' `pane` indices rather than `removePane()`/`swapPanes()`.
 - **Overlays**: Price lines and series markers (`createSeriesMarkers`), both with optional `id`; text and image watermarks (`createTextWatermark`, `createImageWatermark` via `W.image_watermark()`), several per chart, in any pane
@@ -176,11 +187,11 @@ redrawing the chart. Click a name in the legend to hide or show that series.
 
 **High value (recommended next):**
 
-- **Screenshots** - `takeScreenshot()`, to save a chart as PNG from Python
-- **Programmatic crosshair** - `setCrosshairPosition()` / `clearCrosshairPosition()`, e.g. to sync the crosshair across several charts
-- **Whitespace and gaps** - time-only points to leave gaps or extend the time axis into the future
-- **Big data** - data conflation options (v5.2) and sending data in binary rather than JSON for very long series
-- **Other horizontal scales** - `createOptionsChart()` / `createYieldCurveChart()` for numeric x axes (option chains, yield curves)
+- **Binary data transfer** - sending long series as binary buffers instead of JSON (250,000 points currently take about a second to convert and send)
+- **Up/down markers** - `createUpDownMarkers()` (v5), arrows that flash on price changes, a natural fit for `chart.update()`
+- **Pane control from the UI** - syncing pane heights back to Python after the user drags a separator, `preserveEmptyPane`
+- **Price scale extras** - `autoscaleInfoProvider` (fixed or padded ranges) via a declarative wrapper, per-pane `ensureEdgeTickMarksVisible`
+- **Truly proportional numeric axes** - `createOptionsChart()` spaces points evenly by row; a custom horizontal scale behavior could space them by value
 
 Deliberately not wrapped: `subscribeDataChanged` and `subscribeSizeChange` (the data
 and size come from Python, so Python already knows), `data()`/`dataByIndex()` (the

@@ -1,5 +1,7 @@
 import {
   createChart,
+  createOptionsChart,
+  createYieldCurveChart,
   createImageWatermark,
   createTextWatermark,
   createSeriesMarkers,
@@ -121,6 +123,78 @@ function resolveSeriesOptions(options, chartLocale) {
   };
 }
 
+// --- Sync groups: charts with the same sync_group share crosshair and scrolling.
+// Kept on globalThis so every widget on the page sees the same registry. ---
+
+const SYNC = (globalThis.__lwcAnywidgetSync ??= { groups: new Map(), busy: false });
+// A chart that just scrolled to a synced range ignores its own range events for this
+// long, so two charts don't echo ranges back and forth. (A crosshair set from code
+// fires no events, so crosshairs only need the `busy` guard.)
+const SYNC_ECHO_MS = 80;
+
+// The point of `data` (sorted by time) at exactly `time`, if it has a value
+function pointAt(data, time) {
+  let lo = 0;
+  let hi = (data || []).length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const t = data[mid].time;
+    if (t === time) return "close" in data[mid] || "value" in data[mid] ? data[mid] : null;
+    if (t < time) lo = mid + 1;
+    else hi = mid - 1;
+  }
+  return null;
+}
+
+// Draw the HTML legends onto a screenshot canvas (they aren't part of the chart's canvas)
+function drawLegends(canvas, container, legends) {
+  const ctx = canvas.getContext("2d");
+  const scale = canvas.width / container.clientWidth;
+  const origin = container.getBoundingClientRect();
+  ctx.save();
+  ctx.scale(scale, scale);
+  ctx.textBaseline = "middle";
+  for (const legend of legends) {
+    const walker = document.createTreeWalker(legend, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      if (!node.textContent.trim()) continue;
+      const range = document.createRange();
+      range.selectNodeContents(node);
+      const rect = range.getBoundingClientRect();
+      const style = getComputedStyle(node.parentElement);
+      ctx.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+      ctx.fillStyle = style.color;
+      ctx.globalAlpha = Number(getComputedStyle(node.parentElement.closest(".lwc-legend-item") || legend).opacity) || 1;
+      ctx.fillText(node.textContent, rect.left - origin.left, rect.top - origin.top + rect.height / 2);
+    }
+  }
+  ctx.restore();
+}
+
+// Lightweight Charts leaves an empty slot for whitespace points (time only), but line
+// series still join the points on either side. A segment takes the color of the point
+// it starts from, so hide the joining segment by making the point before a gap transparent.
+const GAP_COLORS = {
+  Line: ["color"],
+  Area: ["lineColor", "topColor", "bottomColor"],
+  Baseline: ["topLineColor", "bottomLineColor", "topFillColor1", "topFillColor2", "bottomFillColor1", "bottomFillColor2"],
+};
+const GAP = "transparent";
+
+function hasValue(point) {
+  return "value" in point || "close" in point;
+}
+
+function withLineGaps(type, data) {
+  const keys = GAP_COLORS[type];
+  if (!keys || !data.some((p) => !hasValue(p))) return data;
+  return data.map((point, i) => {
+    const next = data[i + 1];
+    if (!hasValue(point) || !next || hasValue(next)) return point;
+    return { ...point, ...Object.fromEntries(keys.map((k) => [k, GAP])) };
+  });
+}
+
 function seriesColor(series) {
   const o = series.options();
   return o.color || o.lineColor || o.topLineColor || o.upColor || "";
@@ -139,10 +213,15 @@ function render({ model, el }) {
   }
   applySize();
 
-  const chart = createChart(container, {
+  // The horizontal axis type is fixed when the chart is created
+  const xAxis = model.get("x_axis") || "time";
+  const create = { time: createChart, number: createOptionsChart, yield_curve: createYieldCurveChart }[xAxis] || createChart;
+  const chart = create(container, {
     autoSize: true,
     ...resolveChartOptions(model.get("chart_options") || {}),
   });
+  // Yield curve charts show the left axis instead of the right one by default
+  const AXIS_VISIBLE = xAxis === "yield_curve" ? { left: true, right: false } : { left: false, right: true };
 
   // [{ series, config }] for every series currently on the chart
   let seriesList = [];
@@ -203,6 +282,7 @@ function render({ model, el }) {
   // Intraday data (unix-second times) shows the time of day on the axis, and seconds
   // only when some bar has them, unless chart_options.timeScale says otherwise
   function applyAutoTimeScale() {
+    if (xAxis !== "time") return;
     const userTimeScale = (model.get("chart_options") || {}).timeScale || {};
     const times = seriesList.flatMap(({ config }) => (config.data || []).map((p) => p.time));
     const intraday = times.some((t) => typeof t === "number");
@@ -233,8 +313,8 @@ function render({ model, el }) {
     // the chart_options values so a previous render can't leak into new panes.
     const chartOptions = model.get("chart_options") || {};
     chart.applyOptions({
-      leftPriceScale: { ...SCALE_DEFAULTS, visible: false, ...(chartOptions.leftPriceScale || {}) },
-      rightPriceScale: { ...SCALE_DEFAULTS, visible: true, ...(chartOptions.rightPriceScale || {}) },
+      leftPriceScale: { ...SCALE_DEFAULTS, visible: AXIS_VISIBLE.left, ...(chartOptions.leftPriceScale || {}) },
+      rightPriceScale: { ...SCALE_DEFAULTS, visible: AXIS_VISIBLE.right, ...(chartOptions.rightPriceScale || {}) },
     });
 
     for (const config of model.get("series_data") || []) {
@@ -249,7 +329,7 @@ function render({ model, el }) {
       const options = resolveSeriesOptions(config.options || {}, locale);
       const series = chart.addSeries(SeriesType, options, config.pane || 0);
       if (config.data && config.data.length > 0) {
-        series.setData(config.data);
+        series.setData(withLineGaps(config.type, config.data));
       }
       if (config.markers && config.markers.length > 0) {
         const sorted = [...config.markers].sort((a, b) => (a.time < b.time ? -1 : a.time > b.time ? 1 : 0));
@@ -272,7 +352,7 @@ function render({ model, el }) {
       if (side === "left" || side === "right") {
         if (visible !== undefined) axisVisible[side] = visible;
         // The left axis is hidden by default; show it when a series uses it
-        else if (side === "left" && !("left" in axisVisible)) axisVisible.left = true;
+        else if (side === "left" && !AXIS_VISIBLE.left && !("left" in axisVisible)) axisVisible.left = true;
       }
       if (Object.keys(scale).length > 0) {
         series.priceScale().applyOptions(scale);
@@ -333,7 +413,7 @@ function render({ model, el }) {
       const v = document.createElement("span");
       v.className = "lwc-val";
       v.textContent = fmt(data.value);
-      v.style.color = data.color || seriesColor(series);
+      v.style.color = (data.color !== GAP && data.color) || seriesColor(series);
       item.appendChild(v);
     }
     // Skip unlabeled secondary series (e.g. Bollinger outer bands) to keep the legend short
@@ -357,8 +437,11 @@ function render({ model, el }) {
       let data = param && param.time !== undefined ? param.seriesData.get(series) : null;
       // Hidden series aren't in the crosshair data; show their latest value instead
       if (!param || param.time === undefined || (!data && series.options().visible === false)) {
+        // Latest point with a value (skipping whitespace points at the end)
         const all = series.data();
-        data = all[all.length - 1];
+        let i = all.length - 1;
+        while (i > 0 && !("value" in all[i] || "close" in all[i])) i--;
+        data = all[i];
       }
       if (!data) return;
       const item = legendItem(series, config, data, i === 0);
@@ -417,8 +500,71 @@ function render({ model, el }) {
     model.save_changes();
   }, CROSSHAIR_THROTTLE_MS);
 
+  // Show the crosshair on the bar at `time` of one series (or the first series that has one)
+  function showCrosshairAt(time, index = null) {
+    const candidates = index === null ? seriesList : [seriesList[index]];
+    for (const entry of candidates) {
+      const point = entry && pointAt(entry.config.data, time);
+      if (point) {
+        chart.setCrosshairPosition(point.close ?? point.value, time, entry.series);
+        // A crosshair set from code doesn't fire crosshair events, so update the legend here
+        const seriesData = new Map();
+        for (const { series, config } of seriesList) {
+          const p = pointAt(config.data, time);
+          if (p) seriesData.set(series, p);
+        }
+        updateLegend({ time, seriesData });
+        return;
+      }
+    }
+    chart.clearCrosshairPosition();
+    updateLegend(null);
+  }
+
+  // --- Sync group membership ---
+
+  const member = {
+    suppressUntil: 0,
+    crosshairTo(time) {
+      if (time === undefined) {
+        chart.clearCrosshairPosition();
+        updateLegend(null);
+      } else showCrosshairAt(time);
+    },
+    rangeTo(range) {
+      member.suppressUntil = performance.now() + SYNC_ECHO_MS;
+      try {
+        chart.timeScale().setVisibleRange(range);
+      } catch {
+        // no data to scroll yet
+      }
+    },
+  };
+  let syncGroup = null;
+
+  function joinSyncGroup() {
+    if (syncGroup) SYNC.groups.get(syncGroup)?.delete(member);
+    syncGroup = model.get("sync_group") || null;
+    if (!syncGroup) return;
+    if (!SYNC.groups.has(syncGroup)) SYNC.groups.set(syncGroup, new Set());
+    SYNC.groups.get(syncGroup).add(member);
+  }
+
+  function broadcast(apply) {
+    if (!syncGroup || SYNC.busy) return;
+    SYNC.busy = true;
+    try {
+      for (const other of SYNC.groups.get(syncGroup) || []) {
+        if (other !== member) apply(other);
+      }
+    } finally {
+      SYNC.busy = false;
+    }
+  }
+
   chart.subscribeCrosshairMove((param) => {
     updateLegend(param);
+    broadcast((other) => other.crosshairTo(param.time));
     if (param.time !== undefined) {
       sendCrosshair(eventPayload(param));
     }
@@ -468,7 +614,10 @@ function render({ model, el }) {
   }, RANGE_DEBOUNCE_MS);
 
   chart.timeScale().subscribeVisibleLogicalRangeChange((logical) => {
-    if (logical) sendRanges();
+    if (!logical) return;
+    sendRanges();
+    const range = chart.timeScale().getVisibleRange();
+    if (range && performance.now() >= member.suppressUntil) broadcast((other) => other.rangeTo(range));
   });
 
   // --- Commands: Python -> JS (widget.scroll_to_real_time() etc.) ---
@@ -479,6 +628,28 @@ function render({ model, el }) {
     else if (msg.command === "scrollToPosition") timeScale.scrollToPosition(msg.position, !!msg.animated);
     else if (msg.command === "fitContent") timeScale.fitContent();
     else if (msg.command === "update") updatePoint(msg.series, msg.point);
+    else if (msg.command === "setCrosshair") {
+      showCrosshairAt(msg.time, msg.series);
+      broadcast((other) => other.crosshairTo(msg.time));
+    } else if (msg.command === "clearCrosshair") {
+      chart.clearCrosshairPosition();
+      updateLegend(null);
+      broadcast((other) => other.crosshairTo(undefined));
+    } else if (msg.command === "screenshot") takeScreenshot(msg.download);
+  }
+
+  function takeScreenshot(download) {
+    const canvas = chart.takeScreenshot(true);
+    drawLegends(canvas, container, legends);
+    const url = canvas.toDataURL("image/png");
+    model.set("screenshot", url);
+    model.save_changes();
+    if (download) {
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = download;
+      link.click();
+    }
   }
 
   // Live data: add or replace the latest bar of one series without redrawing the chart
@@ -527,6 +698,7 @@ function render({ model, el }) {
     },
     "change:visible_range": applyVisibleRange,
     "change:logical_range": applyLogicalRange,
+    "change:sync_group": joinSyncGroup,
   };
   for (const [event, handler] of Object.entries(handlers)) {
     model.on(event, handler);
@@ -537,8 +709,10 @@ function render({ model, el }) {
   applyWatermark();
   applyVisibleRange();
   applyLogicalRange();
+  joinSyncGroup();
 
   return () => {
+    if (syncGroup) SYNC.groups.get(syncGroup)?.delete(member);
     model.off("msg:custom", onCommand);
     for (const [event, handler] of Object.entries(handlers)) {
       model.off(event, handler);

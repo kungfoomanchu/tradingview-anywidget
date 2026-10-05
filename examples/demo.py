@@ -21,11 +21,13 @@ app = marimo.App(width="full")
 @app.cell
 def _():
     import marimo as mo
+    import numpy as np
+    import pandas as pd
     import yfinance as yf
     from lightweight_charts_anywidget import LightweightChartWidget
 
     W = LightweightChartWidget
-    return W, mo, yf
+    return W, mo, np, pd, yf
 
 
 @app.cell(hide_code=True)
@@ -66,11 +68,12 @@ def _(mo):
     the chart to move it from Python. Below the chart, the events reported back
     to Python update as you hover, click and double-click.
 
-    Three features in the reference below don't fit on this chart: **comparing
-    tickers** (section 5) rescales every ticker to % change, so it's a different
-    kind of chart; **sparklines** (section 8) are several small charts side by
-    side; and **live data** (section 14) streams new bars into a chart, which
-    would leave this chart's indicators behind.
+    Some features in the reference below don't fit on this chart: **comparing
+    tickers** (section 5) rescales every ticker to % change; **sparklines**
+    (section 8) and **synced charts** (section 15) need several charts; **live
+    data** (section 14) would leave this chart's indicators behind; **gaps**
+    (section 17) only matter for data with missing values, which Yahoo's prices
+    don't have; and **numeric x axes** (section 19) aren't time charts at all.
     """)
     return
 
@@ -145,6 +148,7 @@ def _(mo):
     pg_wheel = mo.ui.dropdown(
         options={"Zooms the chart": True, "Scrolls the page": False}, value="Zooms the chart", label="Mouse wheel"
     )
+    pg_conflation = mo.ui.checkbox(value=False, label="Conflation (merge bars when zoomed out)")
 
     def panel_row(title, *items):
         return mo.hstack([mo.md(f"**{title}**").style(width="110px"), *items], justify="start", align="center", gap=1.5, wrap=True)
@@ -159,7 +163,7 @@ def _(mo):
                 panel_row("Line style", pg_line_type, pg_points, pg_ma_style),
                 panel_row("Chart options", pg_grid, pg_crosshair, pg_crosshair_style, pg_scale),
                 panel_row("Formatting", pg_format),
-                panel_row("Time axis", pg_bar_spacing, pg_right_offset, pg_wheel),
+                panel_row("Time axis", pg_bar_spacing, pg_right_offset, pg_wheel, pg_conflation),
             ],
             gap=0.75,
         ),
@@ -168,6 +172,7 @@ def _(mo):
     return (
         period_dropdown,
         pg_chart_type,
+        pg_conflation,
         pg_crosshair,
         pg_crosshair_style,
         pg_bar_spacing,
@@ -202,6 +207,7 @@ def _(
     mo,
     pg_bar_spacing,
     pg_chart_type,
+    pg_conflation,
     pg_crosshair,
     pg_crosshair_style,
     pg_ema,
@@ -325,7 +331,11 @@ def _(
             theme,
             {"grid": {"vertLines": {"color": pg_grid_color}, "horzLines": {"color": pg_grid_color}}},
             W.crosshair(mode=pg_crosshair.value, style=pg_crosshair_style.value),
-            W.time_scale(bar_spacing=pg_bar_spacing.value, right_offset=pg_right_offset.value),
+            W.time_scale(
+                bar_spacing=pg_bar_spacing.value,
+                right_offset=pg_right_offset.value,
+                enable_conflation=pg_conflation.value,
+            ),
             W.interaction(mouse_wheel=pg_wheel.value),
             pg_format_options,
         ),
@@ -342,7 +352,7 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(mo, pg_widget):
+def _(mo, pg_widget, ticker):
     # Depends on the widget object, not its value, so the buttons aren't rebuilt on every mouse move
     pg_bar_count = len(pg_widget.series_data[0]["data"])
 
@@ -354,7 +364,8 @@ def _(mo, pg_widget):
     pg_last_50 = mo.ui.button(label="Last 50 bars", on_click=lambda _: pg_show_last(50))
     pg_back_50 = mo.ui.button(label="Back 50 bars", on_click=lambda _: pg_widget.scroll_to_position(-50, animated=True))
     pg_latest = mo.ui.button(label="Latest bar", on_click=lambda _: pg_widget.scroll_to_real_time())
-    mo.hstack([pg_show_all, pg_last_50, pg_back_50, pg_latest], justify="start", gap=0.5)
+    pg_png = mo.ui.button(label="Download PNG", on_click=lambda _: pg_widget.take_screenshot(download=f"{ticker}.png"))
+    mo.hstack([pg_show_all, pg_last_50, pg_back_50, pg_latest, pg_png], justify="start", gap=0.5)
     return
 
 
@@ -942,8 +953,8 @@ def _(mo):
 
     With `fit_content=True` (the default) the chart zooms to fit every bar on
     each redraw, which overrides `bar_spacing`; the example turns it off.
-    Any other time scale option (`ticks_visible`, `min_bar_spacing`, ...) can be
-    passed by name too.
+    Any other time scale option (`ticks_visible`, `min_bar_spacing`,
+    `enable_conflation`, ...) can be passed by name too.
     """)
     return
 
@@ -1316,6 +1327,363 @@ def _(live_chart, live_stream):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
+    ## 15. Synced charts and the crosshair from Python
+
+    Give several charts the same `sync_group="name"` and they move together:
+    hovering one shows the crosshair at the same time on the others, and
+    scrolling or zooming one scrolls the others to the same dates. This
+    happens in the browser, so it's as smooth as a single chart. Below, the
+    picked ticker is synced with a second one.
+
+    `chart.set_crosshair(time, series=0)` shows the crosshair on a bar from
+    Python, as if the mouse were there (synced charts follow), and
+    `chart.clear_crosshair()` hides it again. `time` can be a date. The
+    dropdown below jumps to the period's biggest daily moves.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    sync_with = mo.ui.text(value="SPY", label="Sync with ticker")
+    sync_with
+    return (sync_with,)
+
+
+@app.cell
+def _(W, df, load_prices, mo, period_dropdown, sync_with, theme, ticker):
+    sync_ticker = sync_with.value.strip().upper()
+    watermark_style = {"color": "rgba(128, 128, 128, 0.15)", "fontSize": 40}
+    sync_top = W(
+        series_data=[W.candlestick(df), W.volume(df)],
+        chart_options=theme,
+        watermark={"text": ticker, **watermark_style},
+        sync_group="section-15",
+        height=260,
+    )
+    sync_bottom = W(
+        series_data=[W.candlestick(load_prices(sync_ticker, period_dropdown.value))],
+        chart_options=theme,
+        watermark={"text": sync_ticker, **watermark_style},
+        sync_group="section-15",
+        height=200,
+    )
+    mo.vstack([mo.ui.anywidget(sync_top), mo.ui.anywidget(sync_bottom)], gap=0.5)
+    return (sync_top,)
+
+
+@app.cell
+def _(df, mo, sync_top):
+    daily_moves = (df["Close"].pct_change() * 100).abs().nlargest(5)
+    jump_to = mo.ui.dropdown(
+        options={
+            f"{df['Date'][i]:%Y-%m-%d} ({df['Close'].pct_change()[i] * 100:+.1f}%)": df["Date"][i].date()
+            for i in daily_moves.index
+        },
+        label="Show the crosshair on",
+    )
+    clear_button = mo.ui.button(label="Clear", on_click=lambda _: sync_top.clear_crosshair())
+    mo.hstack([jump_to, clear_button], justify="start", gap=1)
+    return (jump_to,)
+
+
+@app.cell
+def _(jump_to, sync_top):
+    if jump_to.value:
+        sync_top.set_crosshair(jump_to.value)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## 16. Screenshots
+
+    `chart.take_screenshot()` saves the chart, with its legends, watermarks
+    and price lines, as a PNG:
+
+    - `chart.take_screenshot(download="chart.png")` also opens the browser's
+      download for it (the playground's **Download PNG** button does this).
+    - The PNG arrives back in Python a moment later, in `chart.screenshot` (a
+      `data:` URI). `chart.screenshot_png()` returns its bytes, for
+      `mo.image()`, `mo.download()` or a file.
+    - `chart.save_screenshot("chart.png")` takes one and writes it to a file
+      as soon as it arrives.
+
+    Because the PNG arrives after the cell that asked for it has finished,
+    the example uses `chart.observe(..., names="screenshot")` to put it in a
+    `mo.state`, so the cell below shows each new screenshot.
+    """)
+    return
+
+
+@app.cell
+def _(W, df, mo, theme, ticker):
+    shot_chart = W(
+        series_data=[W.candlestick(df), W.sma(df, period=20), W.volume(df)],
+        chart_options=theme,
+        watermark={"text": ticker, "color": "rgba(128, 128, 128, 0.15)", "fontSize": 64},
+        height=320,
+    )
+    get_shot, set_shot = mo.state("")
+    # Runs when the PNG arrives from the browser (take_screenshot first clears it to "")
+    shot_chart.observe(lambda change: change["new"] and set_shot(change["new"]), names="screenshot")
+    mo.ui.anywidget(shot_chart)
+    return get_shot, shot_chart
+
+
+@app.cell
+def _(mo, shot_chart, ticker):
+    shot_button = mo.ui.button(label="Take screenshot", on_click=lambda _: shot_chart.take_screenshot())
+    shot_download = mo.ui.button(
+        label="Take and download", on_click=lambda _: shot_chart.take_screenshot(download=f"{ticker}.png")
+    )
+    shot_save = mo.ui.button(
+        label="Save next to the notebook",
+        on_click=lambda _: shot_chart.save_screenshot(mo.notebook_dir() / f"{ticker}-chart.png"),
+    )
+    mo.hstack([shot_button, shot_download, shot_save], justify="start", gap=0.5)
+    return
+
+
+@app.cell
+def _(get_shot, mo, shot_chart):
+    mo.vstack(
+        [
+            mo.md(f"Python received a {len(shot_chart.screenshot_png()) // 1024} KB PNG:"),
+            mo.image(shot_chart.screenshot_png(), width=480),
+        ]
+    ) if get_shot() else mo.md("*Take a screenshot to see it here.*")
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## 17. Gaps in the data
+
+    Missing values (NaN) are normally skipped, so a line joins the points on
+    either side of a hole and candles close up. Pass `gaps=True` to
+    `W.candlestick`, `W.bar`, `W.line`, `W.area`, `W.baseline` or
+    `W.histogram` to keep those rows as empty slots instead (Lightweight
+    Charts' "whitespace" points): the line breaks and the time axis keeps the
+    missing dates. Below, two stretches of prices are blanked out to pretend
+    the data has holes.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    show_gaps = mo.ui.checkbox(value=True, label="gaps=True")
+    show_gaps
+    return (show_gaps,)
+
+
+@app.cell
+def _(W, df, mo, show_gaps, theme):
+    holes = df.copy()
+    price_columns = [holes.columns.get_loc(c) for c in ("Open", "High", "Low", "Close")]
+    n = len(holes)
+    holes.iloc[n // 4 : n // 4 + max(2, n // 20), price_columns] = float("nan")
+    holes.iloc[n * 2 // 3 : n * 2 // 3 + max(1, n // 40), price_columns] = float("nan")
+    mo.hstack(
+        [
+            mo.ui.anywidget(W(series_data=[W.candlestick(holes, gaps=show_gaps.value)], chart_options=theme, height=280)),
+            mo.ui.anywidget(
+                W(series_data=[W.line(holes, gaps=show_gaps.value, title="Close")], chart_options=theme, height=280)
+            ),
+        ],
+        widths="equal",
+        gap=1,
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## 18. Large data
+
+    Lightweight Charts draws hundreds of thousands of points smoothly. The
+    slow part is getting them there: every point is converted in Python and
+    sent to the browser as JSON, which takes a second or two at 250,000
+    points. (Sending binary data instead would be faster, but isn't
+    implemented.)
+
+    By default a bar is at least half a pixel wide, so a chart can only zoom
+    out to a few thousand bars. To see more at once, lower
+    `W.time_scale(min_bar_spacing=...)`. Then many bars share each pixel, and
+    **conflation** (`W.time_scale(enable_conflation=True)`) merges them into
+    one bar per pixel while you're zoomed out, which keeps scrolling and
+    zooming fast; zoom in and the real bars come back.
+    `conflation_threshold_factor=` sets how eagerly it merges.
+
+    The example below is a random walk of one-minute bars, so it also shows
+    intraday times on the axis.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    big_size = mo.ui.dropdown(
+        options={"10,000": 10_000, "100,000": 100_000, "250,000": 250_000}, value="100,000", label="Bars"
+    )
+    big_conflation = mo.ui.checkbox(value=True, label="Conflation")
+    mo.hstack([big_size, big_conflation], justify="start", gap=1)
+    return big_conflation, big_size
+
+
+@app.cell
+def _(W, big_conflation, big_size, mo, np, pd, theme):
+    import time as _time
+
+    _started = _time.perf_counter()
+    _steps = np.random.default_rng(1).standard_normal(big_size.value) * 0.05
+    big_df = pd.DataFrame(
+        {
+            "time": pd.date_range("2024-01-02 09:30", periods=big_size.value, freq="1min"),
+            "close": 100 + _steps.cumsum(),
+        }
+    )
+    big_series = W.line(big_df, time_column="time", line_width=1, title="Random walk")
+    _built = _time.perf_counter() - _started
+    mo.vstack(
+        [
+            mo.md(f"Built {big_size.value:,} points in Python in {_built:.2f} s."),
+            mo.ui.anywidget(
+                W(
+                    series_data=[big_series],
+                    chart_options=W.merge_options(
+                        theme, W.time_scale(min_bar_spacing=0.001, enable_conflation=big_conflation.value)
+                    ),
+                    height=320,
+                )
+            ),
+        ]
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## 19. Numeric x axes: option chains and yield curves
+
+    `x_axis=` picks what the horizontal axis measures (set it when creating
+    the widget):
+
+    - `"time"` (default): dates and times.
+    - `"number"`: any increasing number, like an option's strike price. Name
+      the column with `time_column=`, e.g.
+      `W.line(calls, column="impliedVolatility", time_column="strike")`.
+      Rows must be sorted by that column, with no repeats. Like bars on a time
+      chart, the points are spaced evenly, not in proportion to their values.
+    - `"yield_curve"`: maturities in **months** (3 = three months, 120 = ten
+      years), spaced by time to maturity. Yields show on the left axis, as %.
+
+    Below: the implied volatility "smile" of the picked ticker's options (from
+    Yahoo Finance, about a month out) with open interest on the left axis,
+    and the US Treasury yield curve today and a year ago.
+    """)
+    return
+
+
+@app.cell
+def _(mo, yf):
+    @mo.cache
+    def load_option_chain(symbol):
+        """Calls and puts for the expiry closest to a month out, or None if there are no options."""
+        stock = yf.Ticker(symbol)
+        expiries = stock.options
+        if not expiries:
+            return None
+        expiry = expiries[min(4, len(expiries) - 1)]
+        chain = stock.option_chain(expiry)
+        return expiry, chain.calls, chain.puts
+
+    @mo.cache
+    def load_treasury_yields():
+        """Daily closes of the 13-week, 5-, 10- and 30-year US Treasury yields, in %."""
+        yields = yf.download(["^IRX", "^FVX", "^TNX", "^TYX"], period="1y", progress=False)["Close"]
+        return yields.dropna()
+
+    return load_option_chain, load_treasury_yields
+
+
+@app.cell
+def _(W, load_option_chain, mo, theme, ticker):
+    option_chain = load_option_chain(ticker)
+    if option_chain is None:
+        smile_chart = mo.md(f"*{ticker} has no listed options.*")
+    else:
+        expiry, calls, puts = option_chain
+        # Drop quotes without a usable implied volatility
+        calls, puts = (t[t["impliedVolatility"] > 0.01].sort_values("strike") for t in (calls, puts))
+        percent = W.number_format(style="percent", maximum_fraction_digits=1)
+        smile_chart = mo.vstack(
+            [
+                mo.md(f"**{ticker} options expiring {expiry}**"),
+                mo.ui.anywidget(
+                    W(
+                        series_data=[
+                            W.line(calls, column="impliedVolatility", time_column="strike", title="Calls IV",
+                                   color="#26a69a", price_format=percent),
+                            W.line(puts, column="impliedVolatility", time_column="strike", title="Puts IV",
+                                   color="#ef5350", price_format=percent),
+                            {
+                                **W.histogram(calls, column="openInterest", time_column="strike", title="Call OI",
+                                              price_scale_id="left", color="rgba(41, 98, 255, 0.3)",
+                                              price_format={"type": "volume"}, last_value_visible=False),
+                                "priceScale": W.price_scale(margins=(0.6, 0)),
+                            },
+                        ],
+                        x_axis="number",
+                        chart_options=theme,
+                        height=340,
+                    )
+                ),
+            ]
+        )
+    smile_chart
+    return
+
+
+@app.cell
+def _(W, load_treasury_yields, mo, pd, theme):
+    _yields = load_treasury_yields()
+    _maturities = {"^IRX": 3, "^FVX": 60, "^TNX": 120, "^TYX": 360}  # months
+    curves = pd.DataFrame(
+        {
+            "months": list(_maturities.values()),
+            "today": [_yields[t].iloc[-1] for t in _maturities],
+            "year_ago": [_yields[t].iloc[0] for t in _maturities],
+        }
+    )
+    mo.vstack(
+        [
+            mo.md(f"**US Treasury yield curve** ({_yields.index[-1]:%Y-%m-%d} vs {_yields.index[0]:%Y-%m-%d})"),
+            mo.ui.anywidget(
+                W(
+                    series_data=[
+                        W.line(curves, column="today", time_column="months", title="Today", point_markers_visible=True),
+                        W.line(curves, column="year_ago", time_column="months", title="A year ago",
+                               color="#FF6D00", line_style="dashed", point_markers_visible=True),
+                    ],
+                    x_axis="yield_curve",
+                    chart_options=theme,
+                    height=300,
+                )
+            ),
+        ]
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
     # Technical indicators with pandas-ta
 
     The `pta_` helpers compute indicators with
@@ -1324,7 +1692,7 @@ def _(mo):
     same scale as the price are drawn **on the price chart**; the rest
     (oscillators) get **their own pane** below it.
 
-    ## 15. Overlays on the price chart
+    ## 20. Overlays on the price chart
 
     - `W.pta_bbands(df, length=20, std=2.0)`, **Bollinger Bands**: a moving
       average with bands `std` standard deviations above and below. Wide bands
@@ -1373,7 +1741,7 @@ def _(W, df, mo, overlay_dropdown, theme):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ## 16. Oscillators in panes
+    ## 21. Oscillators in panes
 
     Each oscillator helper puts its series in pane `1` (just below the price) by
     default. To stack several, give each a different `pane=`, as this example
@@ -1441,7 +1809,7 @@ def _(W, df, mo, oscillator_height, oscillator_select, rsi_length, theme):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ## 17. Any pandas-ta indicator
+    ## 22. Any pandas-ta indicator
 
     `W.pta(df, "name", **kwargs)` runs **any** of pandas-ta's 200+ indicators by
     name and returns a list of series, one per output column. Keyword arguments

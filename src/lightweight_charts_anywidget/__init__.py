@@ -109,27 +109,32 @@ def _time_values(df, time_column="date"):
     )
 
 
-def _value_points(times, values):
-    """Zip times and values into [{time, value}], skipping rows with a missing time or value."""
+def _value_points(times, values, gaps=False):
+    """Zip times and values into [{time, value}], skipping rows with a missing time or value.
+
+    With gaps=True, rows with a missing value become whitespace points ({time} only),
+    which leave a gap in the series instead of joining its neighbours.
+    """
     return [
-        {"time": t, "value": v}
+        {"time": t, "value": v} if v is not None else {"time": t}
         for t, v in zip(times, values)
-        if t is not None and v is not None
+        if t is not None and (gaps or v is not None)
     ]
 
 
-def _line_points(df, column, time_column):
-    return _value_points(_time_values(df, time_column), _column_values(df, column))
+def _line_points(df, column, time_column, gaps=False):
+    return _value_points(_time_values(df, time_column), _column_values(df, column), gaps)
 
 
-def _ohlc_points(df, time_column):
-    """[{time, open, high, low, close}], skipping rows with any missing value."""
+def _ohlc_points(df, time_column, gaps=False):
+    """[{time, open, high, low, close}], skipping rows with any missing value (or, with
+    gaps=True, keeping them as whitespace points that leave an empty slot)."""
     times = _time_values(df, time_column)
     ohlc = [_column_values(df, k) for k in ("open", "high", "low", "close")]
     return [
-        {"time": t, "open": o, "high": h, "low": l, "close": c}
+        {"time": t, "open": o, "high": h, "low": l, "close": c} if None not in (o, h, l, c) else {"time": t}
         for t, o, h, l, c in zip(times, *ohlc)
-        if t is not None and None not in (o, h, l, c)
+        if t is not None and (gaps or None not in (o, h, l, c))
     ]
 
 
@@ -294,6 +299,10 @@ class LightweightChartWidget(anywidget.AnyWidget):
         height: Chart height in pixels
         watermark: Watermark dict ({"text": ...} or W.image_watermark(...)), or a list of them
         pane_heights: Relative pane heights, e.g. [3, 1, 1] (empty = sub panes at 40% of the main pane)
+        x_axis: "time" (default), "number" (any numeric x, e.g. option strikes) or
+            "yield_curve" (x in months). Only read when the chart is first shown.
+        sync_group: Charts with the same non-empty name share their crosshair and
+            scrolling (in the browser, without a round trip to Python)
         fit_content: Whether to auto-fit content when data changes
         visible_range: Time range to display {from, to} - bidirectional
         logical_range: Bar-index range to display {from, to} - bidirectional
@@ -301,6 +310,7 @@ class LightweightChartWidget(anywidget.AnyWidget):
         clicked_data: Last clicked data point (read from JS)
         double_clicked_data: Last double-clicked data point (read from JS)
         visible_bars: First series' bars on screen {from, to, bars_before, bars_after} (read from JS)
+        screenshot: PNG data: URI of the last take_screenshot() (read from JS)
     """
 
     _esm = _DIR / "chart.js"
@@ -319,6 +329,8 @@ class LightweightChartWidget(anywidget.AnyWidget):
 
     # --- Layout ---
     pane_heights = traitlets.List([]).tag(sync=True)
+    x_axis = traitlets.Enum(["time", "number", "yield_curve"], default_value="time").tag(sync=True)
+    sync_group = traitlets.Unicode("").tag(sync=True)
 
     # --- Navigation ---
     fit_content = traitlets.Bool(True).tag(sync=True)
@@ -330,6 +342,7 @@ class LightweightChartWidget(anywidget.AnyWidget):
     clicked_data = traitlets.Dict({}).tag(sync=True)
     double_clicked_data = traitlets.Dict({}).tag(sync=True)
     visible_bars = traitlets.Dict({}).tag(sync=True)
+    screenshot = traitlets.Unicode("").tag(sync=True)
 
     # ------------------------------------------------------------------
     # Navigation commands (sent to every view of the chart)
@@ -374,6 +387,54 @@ class LightweightChartWidget(anywidget.AnyWidget):
             return
         self.send({"command": "update", "series": series, "point": point})
 
+    def set_crosshair(self, time, series=0):
+        """Show the crosshair on the bar at `time` of a series, as if the mouse were there.
+
+        `time` may be a date/datetime (converted like update()). If the series has no
+        bar at that time, the crosshair is hidden. Synced charts follow it too.
+        """
+        data = self.series_data[series].get("data", [])
+        self.send({"command": "setCrosshair", "series": series, "time": _point_time(time, data)})
+
+    def clear_crosshair(self):
+        """Hide a crosshair shown with set_crosshair()."""
+        self.send({"command": "clearCrosshair"})
+
+    # ------------------------------------------------------------------
+    # Screenshots
+    # ------------------------------------------------------------------
+
+    def take_screenshot(self, download=None):
+        """Take a PNG screenshot of the chart (including legends and watermarks).
+
+        The PNG arrives in the `screenshot` value (a data: URI) once the browser has
+        drawn it, so read it in another cell or with screenshot_png(). Pass a file
+        name as `download` to also save it through the browser's download dialog.
+        """
+        # Clear the last one, so an identical new screenshot still counts as a change
+        self.screenshot = ""
+        self.send({"command": "screenshot", "download": download})
+
+    def screenshot_png(self):
+        """The last screenshot as PNG bytes, or None if none was taken yet."""
+        import base64
+
+        if not self.screenshot:
+            return None
+        return base64.b64decode(self.screenshot.split(",", 1)[1])
+
+    def save_screenshot(self, path):
+        """Take a screenshot and write it to `path` when it arrives from the browser."""
+        path = Path(path)
+
+        def write(change):
+            if change["new"]:
+                path.write_bytes(self.screenshot_png())
+                self.unobserve(write, names="screenshot")
+
+        self.take_screenshot()
+        self.observe(write, names="screenshot")
+
     # ------------------------------------------------------------------
     # Series builders
     #
@@ -385,7 +446,7 @@ class LightweightChartWidget(anywidget.AnyWidget):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def candlestick(df, time_column="date", **options):
+    def candlestick(df, time_column="date", gaps=False, **options):
         """Candlestick series from open/high/low/close columns."""
         defaults = {
             "upColor": UP_COLOR,
@@ -394,32 +455,32 @@ class LightweightChartWidget(anywidget.AnyWidget):
             "wickUpColor": UP_COLOR,
             "wickDownColor": DOWN_COLOR,
         }
-        return _series("Candlestick", _ohlc_points(df, time_column), defaults, options)
+        return _series("Candlestick", _ohlc_points(df, time_column, gaps), defaults, options)
 
     @staticmethod
-    def bar(df, time_column="date", **options):
+    def bar(df, time_column="date", gaps=False, **options):
         """OHLC bar series from open/high/low/close columns."""
         defaults = {"upColor": UP_COLOR, "downColor": DOWN_COLOR}
-        return _series("Bar", _ohlc_points(df, time_column), defaults, options)
+        return _series("Bar", _ohlc_points(df, time_column, gaps), defaults, options)
 
     @staticmethod
-    def line(df, column="close", time_column="date", **options):
+    def line(df, column="close", time_column="date", gaps=False, **options):
         """Line series from one column."""
         defaults = {"color": "#2962FF", "lineWidth": 2}
-        return _series("Line", _line_points(df, column, time_column), defaults, options)
+        return _series("Line", _line_points(df, column, time_column, gaps), defaults, options)
 
     @staticmethod
-    def area(df, column="close", time_column="date", **options):
+    def area(df, column="close", time_column="date", gaps=False, **options):
         """Area series from one column."""
         defaults = {
             "lineColor": "#2962FF",
             "topColor": "rgba(41, 98, 255, 0.56)",
             "bottomColor": "rgba(41, 98, 255, 0.04)",
         }
-        return _series("Area", _line_points(df, column, time_column), defaults, options)
+        return _series("Area", _line_points(df, column, time_column, gaps), defaults, options)
 
     @staticmethod
-    def baseline(df, column="close", time_column="date", base_value=0, **options):
+    def baseline(df, column="close", time_column="date", base_value=0, gaps=False, **options):
         """Baseline series: green above `base_value`, red below."""
         defaults = {
             "baseValue": {"type": "price", "price": base_value},
@@ -430,13 +491,13 @@ class LightweightChartWidget(anywidget.AnyWidget):
             "bottomFillColor1": "rgba(239, 83, 80, 0.05)",
             "bottomFillColor2": "rgba(239, 83, 80, 0.28)",
         }
-        return _series("Baseline", _line_points(df, column, time_column), defaults, options)
+        return _series("Baseline", _line_points(df, column, time_column, gaps), defaults, options)
 
     @staticmethod
-    def histogram(df, column="close", time_column="date", **options):
+    def histogram(df, column="close", time_column="date", gaps=False, **options):
         """Histogram series from one column."""
         defaults = {"color": UP_COLOR}
-        return _series("Histogram", _line_points(df, column, time_column), defaults, options)
+        return _series("Histogram", _line_points(df, column, time_column, gaps), defaults, options)
 
     @staticmethod
     def volume(df, time_column="date", up_color="rgba(38,166,154,0.5)", down_color="rgba(239,83,80,0.5)", **options):

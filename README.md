@@ -2,7 +2,9 @@
 
 A TradingView [Lightweight Charts](https://github.com/tradingview/lightweight-charts) widget for [marimo](https://marimo.io/) notebooks, built with [anywidget](https://anywidget.dev/).
 
-![Candlestick chart with volume, RSI and MACD panes](https://raw.githubusercontent.com/kungfoomanchu/tradingview-anywidget/main/docs/screenshot.png)
+Made for marimo, and tested only there.
+
+![The interactive playground in the marimo demo notebook: a control panel above a candlestick chart with moving averages, buy/sell markers, volume, and RSI and MACD panes](https://raw.githubusercontent.com/kungfoomanchu/tradingview-anywidget/main/docs/screenshot.png)
 
 ## Install
 
@@ -83,14 +85,14 @@ Each helper returns a plain dict you can edit before passing it in `series_data`
 | Chart Methods | ~8 | 15+ | ~50% |
 | Series Methods | ~4 | 20+ | ~20% |
 | Time Scale | 3 | 15+ | ~20% |
-| Price Scale | 1 | 6 | ~17% |
+| Price Scale | 3 | 6 | ~50% |
 | Pane API | 3 | 15+ | ~20% |
-| Events | 2 | 5+ | ~40% |
+| Events | 3 | 5+ | ~60% |
 | Chart Options | 4 groups | 20+ | ~20% |
 | Series Options | ~15 | 60+ | ~25% |
 | Plugins | 2 | 4+ | ~50% |
 
-**Overall: ~25%** of the lightweight-charts v5 API surface (v5.2).
+**Overall: ~30%** of the lightweight-charts v5 API surface (v5.2).
 
 ### What IS wrapped
 
@@ -99,8 +101,10 @@ Each helper returns a plain dict you can edit before passing it in `series_data`
 - **Dynamic updates**: `applyOptions()` for chart options, series add/remove/setData
 - **Panes**: series `pane` index (`addSeries(type, options, paneIndex)`), automatic pane sizing (`setStretchFactor`), per-pane legends
 - **Overlays**: Price lines, series markers (`createSeriesMarkers`), text watermark (`createTextWatermark`)
+- **Price scales**: per-series `priceScale` options (`mode` for log/percentage/indexed, `scaleMargins`, `invertScale`, `autoScale`) applied to that series' own pane only
 - **Events**: Crosshair move, click (with OHLC data), visible time range change (bidirectional)
-- **Basic chart options**: Layout (background, textColor), grid (line colors), crosshair mode
+- **Basic chart options**: Layout (background, textColor), grid (line colors), crosshair mode (Normal/Magnet/Hidden)
+- **Series titles**: every helper sets a `title`, shown in the legend
 - **Legend**: OHLC / series values with titles and colors, formatted with each series' price formatter
 - **Python helpers**: SMA, EMA, volume overlay, dark/light themes (`W.theme()`), pandas/polars DataFrame conversion (daily and intraday)
 - **pandas-ta integration** (optional `pip install pandas-ta`):
@@ -114,8 +118,8 @@ Each helper returns a plain dict you can edit before passing it in `series_data`
 **High value (recommended next):**
 
 - **Time scale options** - `rightOffset`, `barSpacing`, `timeVisible`, `secondsVisible`, `borderVisible`, `fixLeftEdge`/`fixRightEdge`, tick formatters
-- **Price scale options** - `mode` (Log/Percentage/IndexedTo100), `autoScale`, `invertScale`, `scaleMargins`, `visible`, `borderVisible`
-- **More series options** - `title`, `visible` (toggle series on/off), `lineStyle` (Solid/Dotted/Dashed), `lineType` (Simple/Steps/Curved), `pointMarkersVisible`, `crosshairMarkerVisible`, `lastPriceAnimation`
+- **More price scale options** - `visible`, `borderVisible`, left price scale helpers
+- **More series options** - `visible` (toggle series on/off), `lineStyle` (Solid/Dotted/Dashed), `lineType` (Simple/Steps/Curved), `pointMarkersVisible`, `crosshairMarkerVisible`, `lastPriceAnimation`
 - **Series data queries** - `data()`, `dataByIndex()`, `barsInLogicalRange()`
 - **Scroll/zoom control** - `scrollToPosition()`, `scrollToRealTime()`, fine-grained `handleScroll`/`handleScale`
 
@@ -124,7 +128,7 @@ Each helper returns a plain dict you can edit before passing it in `series_data`
 - **More pane control** - `removePane()`, `swapPanes()`, explicit pane heights (`setHeight()`)
 - **Coordinate conversions** - `priceToCoordinate()`, `coordinateToPrice()`, `timeToCoordinate()` (needed for custom overlays)
 - **More events** - `dblClick`, `subscribeDataChanged`, `subscribeVisibleLogicalRangeChange`, `subscribeSizeChange`, hovered series (`hoveredItem`, v5.2)
-- **Crosshair sub-options** - `vertLine`/`horzLine` colors, width, style, label visibility; all mode values (Normal/Magnet/Hidden)
+- **Crosshair sub-options** - `vertLine`/`horzLine` colors, width, style, label visibility
 - **Localization** - locale, date/number formatting
 - **Image watermarks** - `createImageWatermark()`
 
@@ -200,7 +204,7 @@ uv run --extra dev pytest
 
 This project includes AI agent skills (in `.agents/skills/`, symlinked into `.claude/skills/`) managed by [skills.sh](https://skills.sh):
 
-- `marimo-notebook` and `anywidget-generator` from [marimo-team/skills](https://github.com/marimo-team/skills)
+- `marimo-notebook`, `anywidget-generator` and `wasm-compatibility` from [marimo-team/skills](https://github.com/marimo-team/skills)
 - `lightweight-charts` from [tradingview/lightweight-charts](https://github.com/tradingview/lightweight-charts) (v5 API conventions and foot-guns)
 
 The skills are committed, so a fresh clone already has them. To re-download them
@@ -215,6 +219,7 @@ npx skills experimental_install
 ```bash
 npx skills add marimo-team/skills -s marimo-notebook -y
 npx skills add marimo-team/skills -s anywidget-generator -y
+npx skills add marimo-team/skills -s wasm-compatibility -y
 npx skills add tradingview/lightweight-charts -s lightweight-charts -y
 ```
 

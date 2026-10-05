@@ -294,6 +294,7 @@ class LightweightChartWidget(anywidget.AnyWidget):
             - priceScale: optional price scale options for this series' scale
             - markers: optional list of markers for this series
             - price_lines: optional list of price lines for this series
+            - up_down_markers: optional W.up_down_markers(...) (Line/Area series only)
         chart_options: Dict of chart-level options (layout, grid, crosshair, etc.)
         width: Chart width in pixels (0 = fill the container width)
         height: Chart height in pixels
@@ -301,6 +302,9 @@ class LightweightChartWidget(anywidget.AnyWidget):
         pane_heights: Relative pane heights, e.g. [3, 1, 1] (empty = sub panes at 40% of the main pane)
         x_axis: "time" (default), "number" (any numeric x, e.g. option strikes) or
             "yield_curve" (x in months). Only read when the chart is first shown.
+        x_spacing: For x_axis="number": "proportional" (default) spaces points by
+            their x value, "even" spaces them evenly by row, a number sets the grid
+            step used for proportional spacing.
         sync_group: Charts with the same non-empty name share their crosshair and
             scrolling (in the browser, without a round trip to Python)
         fit_content: Whether to auto-fit content when data changes
@@ -330,6 +334,9 @@ class LightweightChartWidget(anywidget.AnyWidget):
     # --- Layout ---
     pane_heights = traitlets.List([]).tag(sync=True)
     x_axis = traitlets.Enum(["time", "number", "yield_curve"], default_value="time").tag(sync=True)
+    x_spacing = traitlets.Union(
+        [traitlets.Enum(["proportional", "even"]), traitlets.Float(min=0)], default_value="proportional"
+    ).tag(sync=True)
     sync_group = traitlets.Unicode("").tag(sync=True)
 
     # --- Navigation ---
@@ -365,7 +372,7 @@ class LightweightChartWidget(anywidget.AnyWidget):
         self.send({"command": "fitContent"})
 
     def update(self, point, series=0):
-        """Add or replace the latest bar of a series without redrawing the chart (live data).
+        """Add a new latest bar, or replace an existing one, without redrawing the chart.
 
         Args:
             point: One data point, e.g. {"time": ..., "open": ..., "high": ...,
@@ -373,19 +380,29 @@ class LightweightChartWidget(anywidget.AnyWidget):
                 a date/datetime; it's converted to the series' time format.
             series: Index of the series in series_data.
 
-        A point with the same time as the latest bar replaces it; a later time adds
-        a new bar. Earlier times are ignored. series_data is updated in place too,
-        so Python sees the new bar, without redrawing the chart.
+        A point with a later time than the latest bar adds a new bar (live data); a
+        point with the same time as an existing bar replaces that bar (the latest
+        bar moving, or a correction to an earlier one). A point between existing
+        bars is ignored: Lightweight Charts can't insert bars. series_data is
+        updated in place too, so Python sees the change.
         """
+        import bisect
+
         data = self.series_data[series].setdefault("data", [])
         point = {**point, "time": _point_time(point["time"], data)}
-        if data and point["time"] == data[-1]["time"]:
-            data[-1] = point
-        elif not data or point["time"] > data[-1]["time"]:
+        if not data or point["time"] > data[-1]["time"]:
             data.append(point)
+            historical = False
+        elif point["time"] == data[-1]["time"]:  # the common live case, without a search
+            data[-1] = point
+            historical = False
         else:
-            return
-        self.send({"command": "update", "series": series, "point": point})
+            i = bisect.bisect_left([p["time"] for p in data], point["time"])
+            if i == len(data) or data[i]["time"] != point["time"]:
+                return
+            data[i] = point
+            historical = i < len(data) - 1
+        self.send({"command": "update", "series": series, "point": point, "historical": historical})
 
     def set_crosshair(self, time, series=0):
         """Show the crosshair on the bar at `time` of a series, as if the mouse were there.
@@ -887,6 +904,23 @@ class LightweightChartWidget(anywidget.AnyWidget):
         if id is not None:
             line["id"] = id
         return line
+
+    @staticmethod
+    def up_down_markers(positive_color=None, negative_color=None, duration=None):
+        """Arrows that flash next to the latest point when chart.update() changes its value.
+
+        Put the result under a Line or Area series' "up_down_markers" key:
+        {**W.line(df), "up_down_markers": W.up_down_markers()}.
+
+        Args:
+            positive_color / negative_color: Arrow colors for a rise / fall.
+            duration: Seconds each arrow stays visible (default 5).
+        """
+        return _options({
+            "positive_color": positive_color,
+            "negative_color": negative_color,
+            "update_visibility_duration": None if duration is None else duration * 1000,
+        })
 
     @staticmethod
     def dark_theme():

@@ -323,19 +323,23 @@ def test_marker_and_price_line_ids():
 # --- Live updates ---
 
 
-def test_update_appends_replaces_and_ignores_older(df, monkeypatch):
+def test_update_appends_and_replaces_existing_bars(df, monkeypatch):
     chart = W(series_data=[W.line(df.head(3))])
     sent = []
     monkeypatch.setattr(chart, "send", sent.append)
     data = chart.series_data[0]["data"]
 
-    chart.update({"time": pd.Timestamp("2024-01-03"), "value": 1.0})  # replaces the last bar
+    chart.update({"time": pd.Timestamp("2024-01-03"), "value": 1.0})  # replaces the latest bar
     assert data[-1] == {"time": "2024-01-03", "value": 1.0} and len(data) == 3
     chart.update({"time": datetime.date(2024, 1, 4), "value": 2.0})  # appends
     assert data[-1]["time"] == "2024-01-04" and len(data) == 4
-    chart.update({"time": "2024-01-01", "value": 3.0})  # older: ignored
-    assert len(data) == 4 and len(sent) == 2
-    assert sent[1] == {"command": "update", "series": 0, "point": {"time": "2024-01-04", "value": 2.0}}
+    assert sent[1] == {
+        "command": "update", "series": 0, "point": {"time": "2024-01-04", "value": 2.0}, "historical": False
+    }
+    chart.update({"time": "2024-01-02", "value": 3.0})  # an earlier bar: replaced
+    assert data[1] == {"time": "2024-01-02", "value": 3.0} and sent[2]["historical"] is True
+    chart.update({"time": "2023-12-25", "value": 4.0})  # no bar at that time: ignored
+    assert len(data) == 4 and len(sent) == 3
 
 
 def test_update_intraday_converts_to_unix_seconds(df):
@@ -394,3 +398,25 @@ def test_x_axis_is_validated():
     assert W(x_axis="number").x_axis == "number"
     with pytest.raises(Exception):
         W(x_axis="log")
+
+
+# --- Up/down markers, price range, numeric spacing ---
+
+
+def test_up_down_markers_options():
+    assert W.up_down_markers() == {}
+    assert W.up_down_markers(positive_color="#0f0", duration=2) == {
+        "positiveColor": "#0f0",
+        "updateVisibilityDuration": 2000,
+    }
+
+
+def test_price_range_passes_through_as_series_option(df):
+    assert W.line(df, price_range=(0, 100))["options"]["priceRange"] == (0, 100)
+
+
+def test_x_spacing_accepts_names_and_steps():
+    assert W(x_spacing="even").x_spacing == "even"
+    assert W(x_spacing=2.5).x_spacing == 2.5
+    with pytest.raises(Exception):
+        W(x_spacing="log")

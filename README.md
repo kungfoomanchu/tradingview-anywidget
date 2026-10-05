@@ -52,6 +52,7 @@ All helpers take a pandas or polars DataFrame:
   Daily data is sent as `"YYYY-MM-DD"`; intraday data as unix seconds, shown in the data's own wall-clock time.
 - **Missing values** (NaN, None) are skipped, or kept as gaps with `gaps=True` (candlestick, bar, line, area, baseline, histogram).
 - **Extra keyword arguments** are passed through as Lightweight Charts series options, in snake_case or camelCase, e.g. `W.line(df, color="#f00", title="Close", line_style="dashed")`.
+  `price_range=(0, 100)` fixes a series' scale instead of fitting it to the data (either end can be `None`).
   Numbered options also take names: `line_style` (`"solid"`, `"dotted"`, `"dashed"`, ...), `line_type` (`"simple"`, `"steps"`, `"curved"`), `last_price_animation`.
 
 ### Series config
@@ -67,6 +68,7 @@ Each helper returns a plain dict you can edit before passing it in `series_data`
 | `priceScale` | Options for the series' price scale in its own pane, e.g. `W.price_scale(mode="log", margins=(0.8, 0))` |
 | `markers` | List of `W.marker(...)` dicts |
 | `price_lines` | List of `W.price_line(...)` dicts |
+| `up_down_markers` | `W.up_down_markers()`: arrows flashing as `chart.update()` changes points (Line/Area) |
 
 ### Chart options
 
@@ -95,8 +97,8 @@ options instead: `W.number_format(style="currency", currency="EUR")` (per series
 Other widget arguments: `watermark=` takes `{"text": ...}`, `W.image_watermark(path_or_url)`
 or a list of them; `pane_heights=[3, 1, 1]` sets relative pane heights;
 `sync_group="name"` links the crosshair and scrolling of every chart with that name;
-`x_axis="number"` (e.g. option strikes) or `"yield_curve"` (maturities in months)
-replaces the time axis.
+`x_axis="number"` (e.g. option strikes, spaced by value unless `x_spacing="even"`) or
+`"yield_curve"` (maturities in months) replaces the time axis.
 
 ### Events
 
@@ -125,8 +127,8 @@ chart.logical_range = {"from": len(df) - 50, "to": len(df) - 1}  # last 50 bars
 chart.update({"time": "2024-06-03", "open": 1, "high": 2, "low": 1, "close": 2})  # live data
 ```
 
-`chart.update(point, series=0)` adds a bar or replaces the latest one without
-redrawing the chart. `chart.set_crosshair(time)` / `chart.clear_crosshair()` move the
+`chart.update(point, series=0)` adds a new latest bar, or replaces an existing one,
+without redrawing the chart. `chart.set_crosshair(time)` / `chart.clear_crosshair()` move the
 crosshair. `chart.take_screenshot(download="chart.png")` saves a PNG through the
 browser and sends it back to Python (`chart.screenshot_png()`);
 `chart.save_screenshot(path)` writes it to a file. Click a name in the legend to hide
@@ -142,21 +144,21 @@ or show that series.
 |----------|---------|-----------|----------|
 | Series Types | 6 | 6 | **100%** |
 | Chart Methods | ~13 | 15+ | ~85% |
-| Series Methods | ~8 | 20+ | ~40% |
+| Series Methods | ~9 | 20+ | ~45% |
 | Time Scale | ~11 | 15+ | ~70% |
 | Price Scale | 5 | 6 | ~85% |
 | Pane API | 4 | 15+ | ~25% |
 | Events | 5 | 5+ | ~95% |
 | Chart Options | 11 groups | 20+ | ~60% |
-| Series Options | ~30 | 60+ | ~50% |
-| Plugins | 3 | 4+ | ~75% |
+| Series Options | ~31 | 60+ | ~50% |
+| Plugins | 4 | 4+ | **100%** |
 
-**Overall: ~55%** of the lightweight-charts v5 API surface (v5.2).
+**Overall: ~60%** of the lightweight-charts v5 API surface (v5.2).
 
 ### What IS wrapped
 
 - **All 6 series types**: Candlestick, Line, Area, Bar, Baseline, Histogram
-- **Chart creation**: `createChart()` with width/height/autoSize, `createOptionsChart()` (`x_axis="number"`) and `createYieldCurveChart()` (`x_axis="yield_curve"`)
+- **Chart creation**: `createChart()` with width/height/autoSize, `createOptionsChart()` (`x_axis="number"`, spaced by value with whitespace points or evenly with `x_spacing="even"`) and `createYieldCurveChart()` (`x_axis="yield_curve"`)
 - **Screenshots**: `takeScreenshot()` (with the HTML legends drawn in) via `chart.take_screenshot()`, `chart.screenshot_png()`, `chart.save_screenshot()`
 - **Synced charts**: crosshair (`setCrosshairPosition()` / `clearCrosshairPosition()`) and visible range shared in the browser between charts with the same `sync_group`; `chart.set_crosshair()` / `chart.clear_crosshair()` from Python
 - **Whitespace data**: `gaps=True` keeps missing rows as time-only points (line, area and baseline series also break their line at the gap)
@@ -164,7 +166,8 @@ or show that series.
 - **Dynamic updates**: `applyOptions()` for chart options, series add/remove/setData
 - **Panes**: series `pane` index (`addSeries(type, options, paneIndex)`), pane sizing (`setStretchFactor`, automatic or via `pane_heights`), per-pane legends. Panes follow `series_data`, so removing, adding or reordering panes is done by changing series' `pane` indices rather than `removePane()`/`swapPanes()`.
 - **Overlays**: Price lines and series markers (`createSeriesMarkers`), both with optional `id`; text and image watermarks (`createTextWatermark`, `createImageWatermark` via `W.image_watermark()`), several per chart, in any pane
-- **Live data**: `series.update()` via `chart.update(point, series=0)`, which also keeps `series_data` in step
+- **Live data**: `series.update()` (including historical updates of existing points) via `chart.update(point, series=0)`, which also keeps `series_data` in step; up/down markers (`createUpDownMarkers`) via the series config's `up_down_markers`
+- **Autoscale**: `autoscaleInfoProvider` for fixed or half-fixed ranges, via the series option `price_range=(min, max)`
 - **Price scales**: per-series `priceScale` options (`mode` for log/percentage/indexed, `scaleMargins`, `invertScale`, `autoScale`, `borderVisible`) applied to that series' own pane only, built with `W.price_scale()`; left price scale shown automatically for series with `priceScaleId: "left"`; axis `visible` (chart-wide)
 - **Time scale**: `W.time_scale()` for `barSpacing`, `rightOffset`, `minBarSpacing`, `timeVisible`, `secondsVisible`, `fixLeftEdge`/`fixRightEdge`, `visible`, `borderVisible` (and any other option by name); `timeVisible`/`secondsVisible` set automatically for intraday data
 - **Scroll/zoom control**: `scrollToRealTime()`, `scrollToPosition()`, `fitContent()` as widget methods (`chart.scroll_to_real_time()`, `chart.scroll_to_position()`, `chart.show_all()`), `setVisibleLogicalRange()` via the bidirectional `logical_range` traitlet, fine-grained `handleScroll`/`handleScale` via `W.interaction()`
@@ -185,20 +188,17 @@ or show that series.
 
 ### What is NOT yet wrapped
 
-**High value (recommended next):**
+**Considered and left out:**
 
-- **Binary data transfer** - sending long series as binary buffers instead of JSON (250,000 points currently take about a second to convert and send)
-- **Up/down markers** - `createUpDownMarkers()` (v5), arrows that flash on price changes, a natural fit for `chart.update()`
-- **Pane control from the UI** - syncing pane heights back to Python after the user drags a separator, `preserveEmptyPane`
-- **Price scale extras** - `autoscaleInfoProvider` (fixed or padded ranges) via a declarative wrapper, per-pane `ensureEdgeTickMarksVisible`
-- **Truly proportional numeric axes** - `createOptionsChart()` spaces points evenly by row; a custom horizontal scale behavior could space them by value
+- **Binary data transfer** - every helper and command works on lists of points, so a second, binary data format would complicate all of them; 250,000 points already load in about a second
+- **Pane heights back to Python** - a dragged layout can't outlive the widget, which is recreated whenever its cell reruns; `preserveEmptyPane` has no use when panes follow `series_data`
 
 Deliberately not wrapped: `subscribeDataChanged` and `subscribeSizeChange` (the data
 and size come from Python, so Python already knows), `data()`/`dataByIndex()` (the
 data is in `series_data`), and coordinate conversions other than the price under the
 mouse (only useful for drawing custom overlays in JS).
 
-**Lower priority:**
+**Lower priority (larger projects):**
 
 - **Custom series** - `addCustomSeries()` with `ICustomSeriesPaneView` (heatmaps, stacked areas, etc.)
 - **Series/pane primitives** - low-level drawing API for custom renderers (drawing tools, trend lines), which would also need `priceToCoordinate()`/`timeToCoordinate()`

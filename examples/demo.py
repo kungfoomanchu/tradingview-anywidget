@@ -23,11 +23,12 @@ def _():
     import marimo as mo
     import numpy as np
     import pandas as pd
+    import random
     import yfinance as yf
     from lightweight_charts_anywidget import LightweightChartWidget
 
     W = LightweightChartWidget
-    return W, mo, np, pd, yf
+    return W, mo, np, pd, random, yf
 
 
 @app.cell(hide_code=True)
@@ -135,6 +136,7 @@ def _(mo):
         label="Number and date format",
     )
     pg_pane_size = mo.ui.slider(start=0.2, stop=1.0, step=0.1, value=0.4, label="Lower pane size", show_value=True)
+    pg_rsi_fixed = mo.ui.checkbox(value=False, label="RSI scale fixed at 0-100")
     pg_scale = mo.ui.dropdown(
         options={"Normal": "normal", "Logarithmic": "log", "Percentage": "percentage", "Indexed to 100": "indexed"},
         value="Normal",
@@ -158,7 +160,7 @@ def _(mo):
             [
                 panel_row("Data", ticker_input, period_dropdown, theme_dropdown, pg_chart_type),
                 panel_row("On the price", pg_volume, pg_sma, pg_ema, pg_overlay),
-                panel_row("Below the price", pg_oscillators, pg_pane_size),
+                panel_row("Below the price", pg_oscillators, pg_pane_size, pg_rsi_fixed),
                 panel_row("Annotations", pg_signals, pg_levels, pg_watermark),
                 panel_row("Line style", pg_line_type, pg_points, pg_ma_style),
                 panel_row("Chart options", pg_grid, pg_crosshair, pg_crosshair_style, pg_scale),
@@ -187,6 +189,7 @@ def _(mo):
         pg_pane_size,
         pg_points,
         pg_right_offset,
+        pg_rsi_fixed,
         pg_scale,
         pg_signals,
         pg_sma,
@@ -221,6 +224,7 @@ def _(
     pg_pane_size,
     pg_points,
     pg_right_offset,
+    pg_rsi_fixed,
     pg_scale,
     pg_signals,
     pg_sma,
@@ -281,7 +285,7 @@ def _(
         next_pane += 1
 
     pg_oscillator_builders = {
-        "RSI": lambda pane: [W.pta_rsi(df, pane=pane)],
+        "RSI": lambda pane: [W.pta_rsi(df, pane=pane, price_range=(0, 100) if pg_rsi_fixed.value else None)],
         "MACD": lambda pane: W.pta_macd(df, pane=pane),
         "Stochastic": lambda pane: W.pta_stoch(df, pane=pane),
         "ATR": lambda pane: [W.pta_atr(df, pane=pane)],
@@ -1256,10 +1260,12 @@ def _(mo):
     mo.md("""
     ## 14. Live data
 
-    `chart.update(point, series=0)` adds a new bar, or replaces the latest one,
-    without redrawing the chart: the view, zoom and hidden series stay as they
-    are. A point with the same time as the latest bar replaces it (a price
-    moving within the day); a later time adds a bar. Older times are ignored.
+    `chart.update(point, series=0)` adds a new bar, or replaces an existing
+    one, without redrawing the chart: the view, zoom and hidden series stay as
+    they are. A later time than the latest bar adds a bar; the same time as an
+    existing bar replaces it (a price moving within the day, or a correction
+    to an earlier bar). A time between existing bars is ignored, since bars
+    can't be inserted.
 
     - `point` is one data point, like the ones in `series_data`:
       `{"time", "open", "high", "low", "close"}` or `{"time", "value"}`. `time`
@@ -1295,16 +1301,15 @@ def _(W, df, mo, theme):
 
 
 @app.cell
-def _(live_chart, live_stream):
+def _(live_chart, live_stream, random):
     import datetime as _dt
-    import random as _random
 
     live_stream  # rerun on every refresh tick
 
     _last = live_chart.series_data[0]["data"][-1]
     _last_volume = live_chart.series_data[1]["data"][-1]
-    _price = round(_last["close"] * (1 + _random.gauss(0, 0.004)), 2)
-    if _random.random() < 0.25:
+    _price = round(_last["close"] * (1 + random.gauss(0, 0.004)), 2)
+    if random.random() < 0.25:
         # Start the next weekday's bar
         _day = _dt.date.fromisoformat(_last["time"]) + _dt.timedelta(days=1)
         while _day.weekday() >= 5:
@@ -1314,7 +1319,7 @@ def _(live_chart, live_stream):
         # Move the latest bar
         _day = _last["time"]
         _open, _high, _low, _volume = _last["open"], max(_last["high"], _price), min(_last["low"], _price), _last_volume["value"]
-    _volume += _random.randint(200_000, 2_000_000)
+    _volume += random.randint(200_000, 2_000_000)
 
     live_chart.update({"time": _day, "open": _open, "high": _high, "low": _low, "close": _price})
     live_chart.update(
@@ -1578,14 +1583,24 @@ def _(mo):
     - `"number"`: any increasing number, like an option's strike price. Name
       the column with `time_column=`, e.g.
       `W.line(calls, column="impliedVolatility", time_column="strike")`.
-      Rows must be sorted by that column, with no repeats. Like bars on a time
-      chart, the points are spaced evenly, not in proportion to their values.
+      Rows must be sorted by that column, with no repeats. Points are spaced
+      by value, so a 5-dollar strike gap is wider than a 2.5-dollar one;
+      `x_spacing="even"` spaces them evenly by row instead (like bars on a time
+      chart), and a number such as `x_spacing=0.5` sets the spacing grid.
     - `"yield_curve"`: maturities in **months** (3 = three months, 120 = ten
       years), spaced by time to maturity. Yields show on the left axis, as %.
 
+    **Up/down markers** suit a fixed set of points that change in place, like
+    a yield curve: add `"up_down_markers": W.up_down_markers()` to a Line or
+    Area series, and each `chart.update()` of one of its points flashes a green
+    or red arrow by it, showing whether it's above or below the value it had
+    when the chart was drawn (options: `positive_color`, `negative_color`,
+    `duration` in seconds). Points added later by `update()` don't get arrows.
+
     Below: the implied volatility "smile" of the picked ticker's options (from
     Yahoo Finance, about a month out) with open interest on the left axis,
-    and the US Treasury yield curve today and a year ago.
+    and the US Treasury yield curve today and a year ago. Pick an interval to
+    simulate yield changes on today's curve.
     """)
     return
 
@@ -1613,7 +1628,14 @@ def _(mo, yf):
 
 
 @app.cell
-def _(W, load_option_chain, mo, theme, ticker):
+def _(mo):
+    strike_spacing = mo.ui.dropdown(options=["proportional", "even"], value="proportional", label="Strike spacing")
+    strike_spacing
+    return (strike_spacing,)
+
+
+@app.cell
+def _(W, load_option_chain, mo, strike_spacing, theme, ticker):
     option_chain = load_option_chain(ticker)
     if option_chain is None:
         smile_chart = mo.md(f"*{ticker} has no listed options.*")
@@ -1635,11 +1657,12 @@ def _(W, load_option_chain, mo, theme, ticker):
                             {
                                 **W.histogram(calls, column="openInterest", time_column="strike", title="Call OI",
                                               price_scale_id="left", color="rgba(41, 98, 255, 0.3)",
-                                              price_format={"type": "volume"}, last_value_visible=False),
+                                              price_format={"type": "volume"}, last_value_visible=False, price_line_visible=False),
                                 "priceScale": W.price_scale(margins=(0.6, 0)),
                             },
                         ],
                         x_axis="number",
+                        x_spacing=strike_spacing.value,
                         chart_options=theme,
                         height=340,
                     )
@@ -1661,23 +1684,35 @@ def _(W, load_treasury_yields, mo, pd, theme):
             "year_ago": [_yields[t].iloc[0] for t in _maturities],
         }
     )
+    yield_chart = W(
+        series_data=[
+            {
+                **W.line(curves, column="today", time_column="months", title="Today", point_markers_visible=True),
+                "up_down_markers": W.up_down_markers(duration=3),
+            },
+            W.line(curves, column="year_ago", time_column="months", title="A year ago",
+                   color="#FF6D00", line_style="dashed", point_markers_visible=True),
+        ],
+        x_axis="yield_curve",
+        chart_options=theme,
+        height=300,
+    )
+    yield_ticks = mo.ui.refresh(options=["1s", "2s", "5s"], label="Simulate yield changes every")
     mo.vstack(
         [
             mo.md(f"**US Treasury yield curve** ({_yields.index[-1]:%Y-%m-%d} vs {_yields.index[0]:%Y-%m-%d})"),
-            mo.ui.anywidget(
-                W(
-                    series_data=[
-                        W.line(curves, column="today", time_column="months", title="Today", point_markers_visible=True),
-                        W.line(curves, column="year_ago", time_column="months", title="A year ago",
-                               color="#FF6D00", line_style="dashed", point_markers_visible=True),
-                    ],
-                    x_axis="yield_curve",
-                    chart_options=theme,
-                    height=300,
-                )
-            ),
+            yield_ticks,
+            mo.ui.anywidget(yield_chart),
         ]
     )
+    return yield_chart, yield_ticks
+
+
+@app.cell
+def _(random, yield_chart, yield_ticks):
+    yield_ticks  # rerun on every refresh tick
+    _point = random.choice(yield_chart.series_data[0]["data"])
+    yield_chart.update({**_point, "value": round(_point["value"] + random.uniform(-0.05, 0.05), 3)})
     return
 
 
@@ -1764,6 +1799,12 @@ def _(mo):
 
     Any series can go in its own pane the same way: add `"pane": n` to its dict,
     e.g. `{**W.volume(df), "pane": 1}`.
+
+    An oscillator's scale normally zooms to the values on screen. The series
+    option `price_range=(min, max)` fixes it instead, e.g.
+    `W.pta_rsi(df, price_range=(0, 100))` keeps the 70/30 lines in the same
+    place as you scroll. Either end can be `None` to keep fitting the data on
+    that side, e.g. `W.line(df, price_range=(0, None))` to always include zero.
     """)
     return
 
@@ -1777,14 +1818,16 @@ def _(mo):
     )
     rsi_length = mo.ui.slider(start=5, stop=50, value=14, label="RSI length")
     oscillator_height = mo.ui.slider(start=0.2, stop=1.0, step=0.1, value=0.4, label="Oscillator pane size", show_value=True)
-    mo.hstack([oscillator_select, rsi_length, oscillator_height], justify="start", gap=2)
-    return oscillator_height, oscillator_select, rsi_length
+    rsi_fixed = mo.ui.checkbox(value=True, label="RSI scale fixed at 0-100")
+    mo.hstack([oscillator_select, rsi_length, oscillator_height, rsi_fixed], justify="start", gap=2, wrap=True)
+    return oscillator_height, oscillator_select, rsi_fixed, rsi_length
 
 
 @app.cell
-def _(W, df, mo, oscillator_height, oscillator_select, rsi_length, theme):
+def _(W, df, mo, oscillator_height, oscillator_select, rsi_fixed, rsi_length, theme):
+    rsi_range = (0, 100) if rsi_fixed.value else None
     oscillators = {
-        "RSI": lambda pane: [W.pta_rsi(df, length=rsi_length.value, pane=pane)],
+        "RSI": lambda pane: [W.pta_rsi(df, length=rsi_length.value, pane=pane, price_range=rsi_range)],
         "MACD": lambda pane: W.pta_macd(df, pane=pane),
         "Stochastic": lambda pane: W.pta_stoch(df, pane=pane),
         "ATR": lambda pane: [W.pta_atr(df, pane=pane)],

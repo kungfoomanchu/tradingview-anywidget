@@ -5,6 +5,7 @@ import {
   createImageWatermark,
   createTextWatermark,
   createSeriesMarkers,
+  createUpDownMarkers,
   CandlestickSeries,
   LineSeries,
   AreaSeries,
@@ -21,6 +22,9 @@ const SERIES_TYPES = {
   Baseline: BaselineSeries,
   Histogram: HistogramSeries,
 };
+
+// Most whitespace points added to space a numeric x axis by value
+const MAX_SPACER_POINTS = 5000;
 
 // Panes below the main price pane get this share of the height relative to it
 const SUB_PANE_STRETCH = 0.4;
@@ -113,14 +117,32 @@ function resolveChartOptions(options) {
   return resolved;
 }
 
-// Series options with a format spec as priceFormat turned into a custom price format
+// Series options from Python turned into what Lightweight Charts expects:
+// - a format spec as priceFormat becomes a custom price format
+// - priceRange: [min, max] (either may be null) becomes an autoscaleInfoProvider
 function resolveSeriesOptions(options, chartLocale) {
-  if (!isFormatSpec(options.priceFormat)) return options;
-  const spec = options.priceFormat;
-  return {
-    ...options,
-    priceFormat: { type: "custom", minMove: spec.minMove ?? 0.01, formatter: makeFormatter(spec, chartLocale) },
-  };
+  const resolved = { ...options };
+  if (isFormatSpec(options.priceFormat)) {
+    const spec = options.priceFormat;
+    resolved.priceFormat = { type: "custom", minMove: spec.minMove ?? 0.01, formatter: makeFormatter(spec, chartLocale) };
+  }
+  if ("priceRange" in options) {
+    delete resolved.priceRange;
+    const [min, max] = Array.isArray(options.priceRange) ? options.priceRange : [];
+    if (min != null || max != null) {
+      resolved.autoscaleInfoProvider = (original) => {
+        const info = original();
+        return {
+          ...(info || {}),
+          priceRange: {
+            minValue: min ?? info?.priceRange?.minValue ?? max,
+            maxValue: max ?? info?.priceRange?.maxValue ?? min,
+          },
+        };
+      };
+    }
+  }
+  return resolved;
 }
 
 // --- Sync groups: charts with the same sync_group share crosshair and scrolling.
@@ -302,6 +324,43 @@ function render({ model, el }) {
     chart.timeScale().setVisibleLogicalRange(lr);
   }
 
+  // A numeric x axis spaces points evenly by row, like bars. To space them by value,
+  // add a hidden series of whitespace points on a regular grid (as Lightweight
+  // Charts' own yield curve chart does).
+  let spacer = null;
+
+  function applyNumberSpacing() {
+    if (spacer) {
+      chart.removeSeries(spacer);
+      spacer = null;
+    }
+    const spacing = model.get("x_spacing");
+    if (xAxis !== "number" || spacing === "even") return;
+    const xs = [...new Set(seriesList.flatMap(({ config }) => (config.data || []).map((p) => p.time)))]
+      .filter((x) => typeof x === "number")
+      .sort((a, b) => a - b);
+    if (xs.length < 2) return;
+    let step = typeof spacing === "number" && spacing > 0 ? spacing : Infinity;
+    if (step === Infinity) {
+      for (let i = 1; i < xs.length; i++) step = Math.min(step, xs[i] - xs[i - 1]);
+    }
+    const first = xs[0];
+    const last = xs[xs.length - 1];
+    step = Math.max(step, (last - first) / MAX_SPACER_POINTS);
+    const points = [];
+    for (let k = 0; ; k++) {
+      const x = Number((first + k * step).toFixed(10));
+      if (x > last) break;
+      points.push({ time: x });
+    }
+    spacer = chart.addSeries(
+      LineSeries,
+      { lastValueVisible: false, priceLineVisible: false, crosshairMarkerVisible: false },
+      0,
+    );
+    spacer.setData(points);
+  }
+
   function renderSeries() {
     for (const { series } of seriesList) {
       chart.removeSeries(series); // also removes panes left empty
@@ -328,8 +387,14 @@ function render({ model, el }) {
       const locale = (model.get("chart_options") || {}).localization?.locale;
       const options = resolveSeriesOptions(config.options || {}, locale);
       const series = chart.addSeries(SeriesType, options, config.pane || 0);
+      // Up/down markers wrap the series: data goes through the plugin so it can
+      // compare each update with the previous value
+      const upDown =
+        config.up_down_markers && (config.type === "Line" || config.type === "Area")
+          ? createUpDownMarkers(series, config.up_down_markers === true ? {} : config.up_down_markers)
+          : null;
       if (config.data && config.data.length > 0) {
-        series.setData(withLineGaps(config.type, config.data));
+        (upDown || series).setData(withLineGaps(config.type, config.data));
       }
       if (config.markers && config.markers.length > 0) {
         const sorted = [...config.markers].sort((a, b) => (a.time < b.time ? -1 : a.time > b.time ? 1 : 0));
@@ -338,8 +403,9 @@ function render({ model, el }) {
       for (const pl of config.price_lines || []) {
         series.createPriceLine(pl);
       }
-      seriesList.push({ series, config });
+      seriesList.push({ series, config, upDown });
     }
+    applyNumberSpacing();
 
     // Apply price scale options only once every pane exists, so they reach just
     // the series' own pane (see the reset above)
@@ -348,6 +414,10 @@ function render({ model, el }) {
     const axisVisible = {};
     for (const { series, config } of seriesList) {
       const { visible, ...scale } = config.priceScale || {};
+      // A fixed price range should fill the pane, not sit inside the default 20%/10% margins
+      if (Array.isArray(config.options?.priceRange) && !scale.scaleMargins) {
+        scale.scaleMargins = { top: 0.05, bottom: 0.05 };
+      }
       const side = config.options?.priceScaleId ?? "right";
       if (side === "left" || side === "right") {
         if (visible !== undefined) axisVisible[side] = visible;
@@ -627,7 +697,7 @@ function render({ model, el }) {
     if (msg.command === "scrollToRealTime") timeScale.scrollToRealTime();
     else if (msg.command === "scrollToPosition") timeScale.scrollToPosition(msg.position, !!msg.animated);
     else if (msg.command === "fitContent") timeScale.fitContent();
-    else if (msg.command === "update") updatePoint(msg.series, msg.point);
+    else if (msg.command === "update") updatePoint(msg.series, msg.point, !!msg.historical);
     else if (msg.command === "setCrosshair") {
       showCrosshairAt(msg.time, msg.series);
       broadcast((other) => other.crosshairTo(msg.time));
@@ -652,22 +722,25 @@ function render({ model, el }) {
     }
   }
 
-  // Live data: add or replace the latest bar of one series without redrawing the chart
-  function updatePoint(index, point) {
+  // Live data: add a new latest bar, or replace an existing one, without redrawing the chart
+  function updatePoint(index, point, historical) {
     const entry = seriesList[index];
     if (!entry) return;
     try {
-      entry.series.update(point);
+      (entry.upDown || entry.series).update(point, historical);
     } catch (error) {
-      console.warn("Can't update the chart with an older bar", point, error);
+      console.warn("Can't update the chart with this bar", point, error);
       return;
     }
     // Keep the synced series_data in step, so a chart redrawn later still has the bar
     // (every open view runs this, so replace rather than append twice)
     const data = (model.get("series_data")[index] || {}).data;
     if (data) {
-      if (data.length && data.at(-1).time === point.time) data[data.length - 1] = point;
-      else if (!data.length || data.at(-1).time < point.time) data.push(point);
+      if (!data.length || data.at(-1).time < point.time) data.push(point);
+      else {
+        const i = data.findIndex((p) => p.time === point.time);
+        if (i >= 0) data[i] = point;
+      }
     }
     updateLegend(null);
   }
@@ -699,6 +772,10 @@ function render({ model, el }) {
     "change:visible_range": applyVisibleRange,
     "change:logical_range": applyLogicalRange,
     "change:sync_group": joinSyncGroup,
+    "change:x_spacing": () => {
+      applyNumberSpacing();
+      if (model.get("fit_content")) chart.timeScale().fitContent();
+    },
   };
   for (const [event, handler] of Object.entries(handlers)) {
     model.on(event, handler);

@@ -166,3 +166,92 @@ def test_pta_vwap_anchor(df):
 
 def test_pta_accepts_polars(df):
     assert len(W.pta_rsi(pl.from_pandas(df))["data"]) > 0
+
+
+# --- Series options: snake_case and enum names ---
+
+
+def test_snake_case_options_become_camel_case(df):
+    opts = W.line(df, line_style="dashed", line_type="steps", point_markers_visible=True, visible=False)["options"]
+    assert opts["lineStyle"] == 2
+    assert opts["lineType"] == 1
+    assert opts["pointMarkersVisible"] is True
+    assert opts["visible"] is False
+
+
+def test_camel_case_options_and_numbers_pass_through(df):
+    opts = W.line(df, lineStyle=1, priceScaleId="left", last_price_animation="continuous")["options"]
+    assert opts["lineStyle"] == 1
+    assert opts["priceScaleId"] == "left"
+    assert opts["lastPriceAnimation"] == 1
+
+
+def test_unknown_enum_name_raises(df):
+    with pytest.raises(ValueError, match="lineStyle"):
+        W.line(df, line_style="wavy")
+
+
+def test_price_line_accepts_style_name():
+    assert W.price_line(100, line_style="dotted")["lineStyle"] == 1
+
+
+# --- Scales, interaction, merging ---
+
+
+def test_time_scale_skips_unset_options():
+    assert W.time_scale(bar_spacing=10, fix_right_edge=True, ticks_visible=True) == {
+        "timeScale": {"barSpacing": 10, "fixRightEdge": True, "ticksVisible": True}
+    }
+
+
+def test_price_scale_mode_name_and_margins():
+    assert W.price_scale(mode="log", margins=(0.8, 0), border_visible=False) == {
+        "mode": 1,
+        "borderVisible": False,
+        "scaleMargins": {"top": 0.8, "bottom": 0},
+    }
+
+
+def test_interaction_mouse_wheel_off_keeps_dragging():
+    opts = W.interaction(mouse_wheel=False)
+    assert opts["handleScroll"]["mouseWheel"] is False
+    assert opts["handleScroll"]["pressedMouseMove"] is True
+    assert opts["handleScale"]["mouseWheel"] is False
+    assert opts["handleScale"]["pinch"] is True
+
+
+def test_merge_options_is_deep_and_does_not_mutate():
+    theme = W.theme("dark")
+    merged = W.merge_options(theme, W.time_scale(bar_spacing=10))
+    assert merged["timeScale"] == {"borderColor": "#2a2e39", "barSpacing": 10}
+    assert theme["timeScale"] == {"borderColor": "#2a2e39"}
+
+
+def test_rows_in_range_pandas_and_polars(df):
+    time_range = {"from": "2024-01-03", "to": "2024-01-05"}
+    assert len(W.rows_in_range(df, time_range)) == 3
+    assert W.rows_in_range(pl.from_pandas(df), time_range).height == 3
+    assert W.rows_in_range(df, {}) is df
+
+
+def test_rows_in_range_intraday(df):
+    intraday = df.assign(Date=pd.date_range("2024-01-02 09:30", periods=200, freq="5min"))
+    start = 1704187800  # 09:30
+    assert len(W.rows_in_range(intraday, {"from": start, "to": start + 600})) == 3
+
+
+# --- Navigation commands ---
+
+
+def test_navigation_methods_send_commands(monkeypatch):
+    chart = W()
+    sent = []
+    monkeypatch.setattr(chart, "send", sent.append)
+    chart.scroll_to_real_time()
+    chart.scroll_to_position(-20, animated=True)
+    chart.show_all()
+    assert sent == [
+        {"command": "scrollToRealTime"},
+        {"command": "scrollToPosition", "position": -20, "animated": True},
+        {"command": "fitContent"},
+    ]

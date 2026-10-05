@@ -29,3 +29,14 @@
   font-weight: 600;
   margin: 0 2px;
 }
+
+/* Legend entries are clickable: click to hide/show the series */
+.lwc-legend-item {
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.lwc-legend-item.lwc-hidden {
+  opacity: 0.4;
+  text-decoration: line-through;
+}

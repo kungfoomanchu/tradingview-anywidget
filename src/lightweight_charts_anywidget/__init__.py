@@ -120,9 +120,47 @@ def _ohlc_points(df, time_column):
     ]
 
 
+def _camel(name):
+    """snake_case -> camelCase ("line_style" -> "lineStyle"); camelCase names are unchanged."""
+    first, *rest = name.split("_")
+    return first + "".join(part[:1].upper() + part[1:] for part in rest)
+
+
+# Option values that can be given by name instead of Lightweight Charts' enum numbers
+_ENUMS = {
+    "lineStyle": {"solid": 0, "dotted": 1, "dashed": 2, "large_dashed": 3, "sparse_dotted": 4},
+    "lineType": {"simple": 0, "steps": 1, "curved": 2},
+    "lastPriceAnimation": {"disabled": 0, "continuous": 1, "on_data_update": 2},
+    "mode": {"normal": 0, "log": 1, "logarithmic": 1, "percentage": 2, "indexed": 3, "indexed_to_100": 3},
+}
+
+
+def _enum_value(key, value):
+    if isinstance(value, str) and key in _ENUMS:
+        try:
+            return _ENUMS[key][value.lower()]
+        except KeyError:
+            raise ValueError(f"Unknown {key} {value!r}. Use one of {list(_ENUMS[key])}") from None
+    return value
+
+
+def _options(options):
+    """Convert user options to Lightweight Charts names: camelCase keys, enum names to numbers.
+
+    `None` values are dropped, so helpers can default every option to None.
+    """
+    result = {}
+    for key, value in options.items():
+        if value is None:
+            continue
+        key = _camel(key)
+        result[key] = _enum_value(key, value)
+    return result
+
+
 def _series(type_, data, defaults, options, **extra):
     """Build a series config dict, letting user `options` override `defaults`."""
-    return {"type": type_, "data": data, "options": {**defaults, **options}, **extra}
+    return {"type": type_, "data": data, "options": {**defaults, **_options(options)}, **extra}
 
 
 # Options shared by indicator lines that shouldn't clutter the price axis
@@ -244,8 +282,10 @@ class LightweightChartWidget(anywidget.AnyWidget):
         watermark: Watermark configuration dict
         fit_content: Whether to auto-fit content when data changes
         visible_range: Time range to display {from, to} - bidirectional
+        logical_range: Bar-index range to display {from, to} - bidirectional
         crosshair_data: Current crosshair position (read from JS)
         clicked_data: Last clicked data point (read from JS)
+        visible_bars: First series' bars on screen {from, to, bars_before, bars_after} (read from JS)
     """
 
     _esm = _DIR / "chart.js"
@@ -265,10 +305,32 @@ class LightweightChartWidget(anywidget.AnyWidget):
     # --- Navigation ---
     fit_content = traitlets.Bool(True).tag(sync=True)
     visible_range = traitlets.Dict({}).tag(sync=True)
+    logical_range = traitlets.Dict({}).tag(sync=True)
 
     # --- Events (JS -> Python) ---
     crosshair_data = traitlets.Dict({}).tag(sync=True)
     clicked_data = traitlets.Dict({}).tag(sync=True)
+    visible_bars = traitlets.Dict({}).tag(sync=True)
+
+    # ------------------------------------------------------------------
+    # Navigation commands (sent to every view of the chart)
+    # ------------------------------------------------------------------
+
+    def scroll_to_real_time(self):
+        """Scroll to the latest bar, keeping the current zoom."""
+        self.send({"command": "scrollToRealTime"})
+
+    def scroll_to_position(self, position, animated=False):
+        """Scroll so the latest bar is `position` bars from the right edge.
+
+        Positive values leave empty space on the right; negative values scroll back
+        into history (e.g. -50 hides the last 50 bars off the right edge).
+        """
+        self.send({"command": "scrollToPosition", "position": position, "animated": animated})
+
+    def show_all(self):
+        """Zoom out so every bar fits on screen (Lightweight Charts' fitContent)."""
+        self.send({"command": "fitContent"})
 
     # ------------------------------------------------------------------
     # Series builders
@@ -700,14 +762,15 @@ class LightweightChartWidget(anywidget.AnyWidget):
             price: Price value for the horizontal line
             color: Line color
             line_width: Width in pixels
-            line_style: 0=Solid, 1=Dotted, 2=Dashed, 3=LargeDashed, 4=SparseDotted
+            line_style: "solid", "dotted", "dashed", "large_dashed", "sparse_dotted"
+                (or 0-4)
             title: Label text
         """
         return {
             "price": price,
             "color": color,
             "lineWidth": line_width,
-            "lineStyle": line_style,
+            "lineStyle": _enum_value("lineStyle", line_style),
             "axisLabelVisible": True,
             "title": title,
         }
@@ -755,3 +818,140 @@ class LightweightChartWidget(anywidget.AnyWidget):
         In marimo, follow the notebook theme with `W.theme(mo.app_meta().theme)`.
         """
         return LightweightChartWidget.dark_theme() if name == "dark" else LightweightChartWidget.light_theme()
+
+    # ------------------------------------------------------------------
+    # Scales, interaction and option merging
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def time_scale(
+        bar_spacing=None,
+        right_offset=None,
+        min_bar_spacing=None,
+        time_visible=None,
+        seconds_visible=None,
+        fix_left_edge=None,
+        fix_right_edge=None,
+        visible=None,
+        border_visible=None,
+        **options,
+    ):
+        """chart_options for the horizontal time axis, as {"timeScale": {...}}.
+
+        Args:
+            bar_spacing: Pixels per bar, i.e. the initial zoom (library default 6).
+            right_offset: Empty bars to leave right of the latest bar.
+            min_bar_spacing: Smallest bar spacing zooming out can reach.
+            time_visible: Show the time of day on the axis (on by default for intraday data).
+            seconds_visible: Show seconds (on by default when the data has them).
+            fix_left_edge / fix_right_edge: Stop scrolling past the first / latest bar.
+            visible: Show the time axis.
+            border_visible: Draw the border line above the axis.
+            **options: Any other time scale option, in snake_case or camelCase.
+
+        Options left as None keep their current value. Combine with a theme using
+        W.merge_options(theme, W.time_scale(...)).
+        """
+        return {"timeScale": _options({
+            "bar_spacing": bar_spacing,
+            "right_offset": right_offset,
+            "min_bar_spacing": min_bar_spacing,
+            "time_visible": time_visible,
+            "seconds_visible": seconds_visible,
+            "fix_left_edge": fix_left_edge,
+            "fix_right_edge": fix_right_edge,
+            "visible": visible,
+            "border_visible": border_visible,
+            **options,
+        })}
+
+    @staticmethod
+    def price_scale(
+        mode=None,
+        visible=None,
+        border_visible=None,
+        auto_scale=None,
+        invert_scale=None,
+        margins=None,
+        **options,
+    ):
+        """Price scale options for a series' "priceScale" key (or chart_options["rightPriceScale"]).
+
+        Args:
+            mode: "normal", "log", "percentage" or "indexed" (to 100), or 0-3.
+            visible: Show the axis. A series with priceScaleId="left" shows the left
+                axis automatically unless this is False. Left/right axis visibility
+                applies to every pane: Lightweight Charts lays the axes out chart-wide.
+            border_visible: Draw the border line beside the axis.
+            auto_scale: Fit the scale to the visible data.
+            invert_scale: Flip the scale upside down.
+            margins: (top, bottom) fractions of the pane kept empty, e.g. (0.8, 0)
+                to keep a series in the bottom 20%.
+            **options: Any other price scale option, in snake_case or camelCase.
+        """
+        if margins is not None:
+            top, bottom = margins
+            options["scale_margins"] = {"top": top, "bottom": bottom}
+        return _options({
+            "mode": mode,
+            "visible": visible,
+            "border_visible": border_visible,
+            "auto_scale": auto_scale,
+            "invert_scale": invert_scale,
+            **options,
+        })
+
+    @staticmethod
+    def interaction(scroll=True, zoom=True, mouse_wheel=True):
+        """chart_options for how the mouse and touch move the chart.
+
+        Args:
+            scroll: Drag (and wheel) to scroll through time.
+            zoom: Wheel, pinch and axis drag to zoom; double-click an axis to reset.
+            mouse_wheel: Let the mouse wheel scroll/zoom the chart. False leaves the
+                wheel to the page, so scrolling the notebook doesn't get stuck on the chart.
+        """
+        return {
+            "handleScroll": {
+                "mouseWheel": scroll and mouse_wheel,
+                "pressedMouseMove": scroll,
+                "horzTouchDrag": scroll,
+                "vertTouchDrag": scroll,
+            },
+            "handleScale": {
+                "mouseWheel": zoom and mouse_wheel,
+                "pinch": zoom,
+                "axisPressedMouseMove": zoom,
+                "axisDoubleClickReset": zoom,
+            },
+        }
+
+    @staticmethod
+    def merge_options(*dicts):
+        """Deep-merge chart_options dicts; later ones win, nested dicts are merged key by key.
+
+        W.merge_options(theme, W.time_scale(bar_spacing=10)) keeps the theme's
+        timeScale border color while adding the bar spacing.
+        """
+        merged = {}
+        for d in dicts:
+            for key, value in (d or {}).items():
+                if isinstance(value, dict) and isinstance(merged.get(key), dict):
+                    merged[key] = LightweightChartWidget.merge_options(merged[key], value)
+                else:
+                    merged[key] = value
+        return merged
+
+    @staticmethod
+    def rows_in_range(df, time_range, time_column="date"):
+        """Rows of `df` whose time is inside a {"from", "to"} range, e.g. the chart's visible_range.
+
+        Works with pandas and polars. An empty range returns `df` unchanged.
+        """
+        if not time_range or time_range.get("from") is None or time_range.get("to") is None:
+            return df
+        start, end = time_range["from"], time_range["to"]
+        mask = [t is not None and start <= t <= end for t in _time_values(df, time_column)]
+        if hasattr(df, "filter") and not hasattr(df, "loc"):  # polars
+            return df.filter(mask)
+        return df[mask]

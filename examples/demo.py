@@ -61,7 +61,9 @@ def _(mo):
     panes, scroll to zoom.
 
     Pick a few features at a time rather than all of them: each oscillator adds
-    a pane, and several overlays on one price chart get hard to read.
+    a pane, and several overlays on one price chart get hard to read. Click a
+    name in the legend to hide or show that series, and use the buttons below
+    the chart to move it from Python.
 
     Two features in the reference below don't fit on this chart: **comparing
     tickers** (section 5) rescales every ticker to % change, so it's a different
@@ -93,7 +95,9 @@ def _(mo):
         value="Candlestick",
         label="Chart type",
     )
-    pg_volume = mo.ui.dropdown(options=["Off", "Overlay", "Own pane"], value="Overlay", label="Volume")
+    pg_volume = mo.ui.dropdown(
+        options=["Off", "Overlay", "Overlay, left axis", "Own pane"], value="Overlay", label="Volume"
+    )
     pg_sma = mo.ui.dropdown(options=ma_periods, value="20", label="SMA")
     pg_ema = mo.ui.dropdown(options=ma_periods, value="Off", label="EMA")
     pg_overlay = mo.ui.dropdown(
@@ -112,9 +116,17 @@ def _(mo):
     pg_grid = mo.ui.checkbox(value=True, label="Grid")
     pg_crosshair = mo.ui.dropdown(options={"Normal": 0, "Magnet": 1, "Hidden": 2}, value="Normal", label="Crosshair")
     pg_scale = mo.ui.dropdown(
-        options={"Normal": 0, "Logarithmic": 1, "Percentage": 2, "Indexed to 100": 3},
+        options={"Normal": "normal", "Logarithmic": "log", "Percentage": "percentage", "Indexed to 100": "indexed"},
         value="Normal",
         label="Price scale",
+    )
+    pg_line_type = mo.ui.dropdown(options=["simple", "steps", "curved"], value="simple", label="Line type")
+    pg_points = mo.ui.checkbox(value=False, label="Point markers")
+    pg_ma_style = mo.ui.dropdown(options=["solid", "dotted", "dashed"], value="solid", label="Average line style")
+    pg_bar_spacing = mo.ui.slider(start=2, stop=20, value=6, label="Bar spacing", show_value=True)
+    pg_right_offset = mo.ui.slider(start=0, stop=30, value=0, label="Right offset", show_value=True)
+    pg_wheel = mo.ui.dropdown(
+        options={"Zooms the chart": True, "Scrolls the page": False}, value="Zooms the chart", label="Mouse wheel"
     )
 
     def panel_row(title, *items):
@@ -127,7 +139,9 @@ def _(mo):
                 panel_row("On the price", pg_volume, pg_sma, pg_ema, pg_overlay),
                 panel_row("Below the price", pg_oscillators),
                 panel_row("Annotations", pg_signals, pg_levels, pg_watermark),
+                panel_row("Line style", pg_line_type, pg_points, pg_ma_style),
                 panel_row("Chart options", pg_grid, pg_crosshair, pg_scale),
+                panel_row("Time axis", pg_bar_spacing, pg_right_offset, pg_wheel),
             ],
             gap=0.75,
         ),
@@ -137,16 +151,22 @@ def _(mo):
         period_dropdown,
         pg_chart_type,
         pg_crosshair,
+        pg_bar_spacing,
         pg_ema,
         pg_grid,
         pg_levels,
+        pg_line_type,
+        pg_ma_style,
         pg_oscillators,
         pg_overlay,
+        pg_points,
+        pg_right_offset,
         pg_scale,
         pg_signals,
         pg_sma,
         pg_volume,
         pg_watermark,
+        pg_wheel,
         theme_dropdown,
         ticker_input,
     )
@@ -158,32 +178,40 @@ def _(
     crossover_markers,
     df,
     mo,
+    pg_bar_spacing,
     pg_chart_type,
     pg_crosshair,
     pg_ema,
     pg_grid,
     pg_levels,
+    pg_line_type,
+    pg_ma_style,
     pg_oscillators,
     pg_overlay,
+    pg_points,
+    pg_right_offset,
     pg_scale,
     pg_signals,
     pg_sma,
     pg_volume,
     pg_watermark,
+    pg_wheel,
     theme,
     ticker,
 ):
+    # Line styles only apply to the line-based series types
+    pg_line_style = {"line_type": pg_line_type.value, "point_markers_visible": pg_points.value}
     main_builders = {
         "Candlestick": lambda: W.candlestick(df),
         "Bar": lambda: W.bar(df),
-        "Line": lambda: W.line(df),
-        "Area": lambda: W.area(df),
-        "Baseline": lambda: W.baseline(df, base_value=float(df["Close"].mean())),
+        "Line": lambda: W.line(df, **pg_line_style),
+        "Area": lambda: W.area(df, **pg_line_style),
+        "Baseline": lambda: W.baseline(df, base_value=float(df["Close"].mean()), **pg_line_style),
         "Histogram": lambda: W.histogram(df),
     }
     main_series = main_builders[pg_chart_type.value]()
     # Set the scale mode on the price pane only, so oscillator panes keep a normal scale
-    main_series["priceScale"] = {"mode": pg_scale.value}
+    main_series["priceScale"] = W.price_scale(mode=pg_scale.value)
     if pg_signals.value:
         main_series["markers"] = crossover_markers(W.sma(df, period=10), W.sma(df, period=30))
     if pg_levels.value:
@@ -195,9 +223,9 @@ def _(
     pg_series = [main_series]
 
     if pg_sma.value:
-        pg_series.append(W.sma(df, period=pg_sma.value))
+        pg_series.append(W.sma(df, period=pg_sma.value, line_style=pg_ma_style.value))
     if pg_ema.value:
-        pg_series.append(W.ema(df, period=pg_ema.value))
+        pg_series.append(W.ema(df, period=pg_ema.value, line_style=pg_ma_style.value))
 
     pg_overlays = {
         "Off": lambda: [],
@@ -211,6 +239,9 @@ def _(
     next_pane = 1
     if pg_volume.value == "Overlay":
         pg_series.append(W.volume(df))
+    elif pg_volume.value == "Overlay, left axis":
+        # A series on the "left" scale shows the left axis automatically
+        pg_series.append(W.volume(df, price_scale_id="left"))
     elif pg_volume.value == "Own pane":
         pg_series.append(
             {**W.volume(df, priceScaleId="right"), "pane": next_pane,
@@ -231,27 +262,50 @@ def _(
         next_pane += 1
 
     pg_grid_color = theme["grid"]["vertLines"]["color"] if pg_grid.value else "transparent"
-    playground = mo.ui.anywidget(
-        W(
-            series_data=pg_series,
-            chart_options={
-                **theme,
+    pg_widget = W(
+        series_data=pg_series,
+        chart_options=W.merge_options(
+            theme,
+            {
                 "grid": {"vertLines": {"color": pg_grid_color}, "horzLines": {"color": pg_grid_color}},
                 "crosshair": {"mode": pg_crosshair.value},
             },
-            watermark={"text": ticker, "color": "rgba(128, 128, 128, 0.15)", "fontSize": 64} if pg_watermark.value else {},
-            height=460 + 140 * (next_pane - 1),
-        )
+            W.time_scale(bar_spacing=pg_bar_spacing.value, right_offset=pg_right_offset.value),
+            W.interaction(mouse_wheel=pg_wheel.value),
+        ),
+        watermark={"text": ticker, "color": "rgba(128, 128, 128, 0.15)", "fontSize": 64} if pg_watermark.value else {},
+        # Keep the bar spacing picked above instead of fitting every bar on screen
+        fit_content=False,
+        height=460 + 140 * (next_pane - 1),
     )
+    playground = mo.ui.anywidget(pg_widget)
     playground
-    return (playground,)
+    return pg_widget, playground
+
+
+@app.cell(hide_code=True)
+def _(mo, pg_widget):
+    # Depends on the widget object, not its value, so the buttons aren't rebuilt on every mouse move
+    pg_bar_count = len(pg_widget.series_data[0]["data"])
+
+    def pg_show_last(n):
+        pg_widget.logical_range = {"from": pg_bar_count - n, "to": pg_bar_count - 1}
+
+    # Buttons must be assigned to variables for marimo to run their on_click
+    pg_show_all = mo.ui.button(label="Show all", on_click=lambda _: pg_widget.show_all())
+    pg_last_50 = mo.ui.button(label="Last 50 bars", on_click=lambda _: pg_show_last(50))
+    pg_back_50 = mo.ui.button(label="Back 50 bars", on_click=lambda _: pg_widget.scroll_to_position(-50, animated=True))
+    pg_latest = mo.ui.button(label="Latest bar", on_click=lambda _: pg_widget.scroll_to_real_time())
+    mo.hstack([pg_show_all, pg_last_50, pg_back_50, pg_latest], justify="start", gap=0.5)
+    return
 
 
 @app.cell(hide_code=True)
 def _(mo, playground):
     mo.md(f"""
     **Crosshair:** {describe_event(playground.value.get("crosshair_data", {}), "hover over the chart")}<br>
-    **Last click:** {describe_event(playground.value.get("clicked_data", {}), "click on the chart")}
+    **Last click:** {describe_event(playground.value.get("clicked_data", {}), "click on the chart")}<br>
+    **On screen:** {describe_visible_bars(playground.value.get("visible_bars", {}))}
     """)
     return
 
@@ -570,11 +624,15 @@ def _(mo):
 
     `rightPriceScale` applies to the price scale of **every pane**, so a log
     scale would also squash an RSI pane. To change only the price pane, set the
-    scale on the price series instead: `{**W.candlestick(df), "priceScale": {"mode": 1}}`.
+    scale on the price series instead:
+    `{**W.candlestick(df), "priceScale": W.price_scale(mode="log")}` (section 9).
 
     `W.theme("dark")` and `W.theme("light")` return a full set of colors for the
     background, text, grid and borders; `W.theme(mo.app_meta().theme)` follows
-    the notebook's own theme. Merge your own options on top with `{**theme, ...}`.
+    the notebook's own theme. Add your own options on top with
+    `W.merge_options(theme, {...})`, which merges nested dicts key by key, so
+    `{"rightPriceScale": {"mode": 1}}` keeps the theme's border color. (A plain
+    `{**theme, ...}` replaces the whole `rightPriceScale` dict.)
     """)
     return
 
@@ -602,12 +660,14 @@ def _(W, crosshair_mode, df, grid_visible, mo, price_scale_mode, theme):
     mo.ui.anywidget(
         W(
             series_data=[W.candlestick(df), W.volume(df)],
-            chart_options={
-                **theme,
-                "grid": {"vertLines": {"color": grid_color}, "horzLines": {"color": grid_color}},
-                "crosshair": {"mode": crosshair_mode.value},
-                "rightPriceScale": {**theme["rightPriceScale"], "mode": price_scale_mode.value},
-            },
+            chart_options=W.merge_options(
+                theme,
+                {
+                    "grid": {"vertLines": {"color": grid_color}, "horzLines": {"color": grid_color}},
+                    "crosshair": {"mode": crosshair_mode.value},
+                    "rightPriceScale": {"mode": price_scale_mode.value},
+                },
+            ),
             height=400,
         )
     )
@@ -628,10 +688,22 @@ def _(mo):
     - `clicked_data`: the same, for the last bar clicked.
     - `visible_range`: the `{"from", "to"}` times currently on screen, updated
       after scrolling or zooming. Setting it from Python scrolls the chart.
+    - `logical_range`: the same range as bar indices (`0` is the first bar;
+      fractions and values past the last bar are allowed). Setting it from
+      Python also scrolls the chart (section 11).
+    - `visible_bars`: the first series' bars on screen, as
+      `{"from", "to", "bars_before", "bars_after"}`: the times of the first and
+      last visible bar and how many bars are off screen on each side. A small
+      `bars_before` means the user scrolled to the start of the data.
+
+    `W.rows_in_range(df, chart.value["visible_range"])` returns the DataFrame
+    rows that are on screen (pandas or polars), for stats about what the user
+    is looking at, like the return over the visible bars below.
 
     Any cell that reads these reruns when they change, like the summary below
-    the chart. Crosshair updates are limited to 10 per second so the notebook
-    doesn't rerun on every pixel of mouse movement.
+    the chart. Crosshair updates are limited to 10 per second, and range
+    updates are sent once scrolling stops, so the notebook doesn't rerun on
+    every pixel of mouse movement.
     """)
     return
 
@@ -659,14 +731,31 @@ def describe_event(event, empty_text):
     )
 
 
+@app.function
+def describe_visible_bars(bars):
+    """One-line summary of a visible_bars event."""
+    if not bars:
+        return "scroll or zoom the chart"
+    return (
+        f"`{bars['from']}` → `{bars['to']}` · {bars['bars_before']} bars before, "
+        f"{bars['bars_after']} after"
+    )
+
+
 @app.cell
-def _(events_chart, mo):
+def _(W, df, events_chart, mo):
     visible = events_chart.value.get("visible_range", {})
+    logical = events_chart.value.get("logical_range", {})
+    on_screen = W.rows_in_range(df, visible)
+    visible_return = (on_screen["Close"].iloc[-1] / on_screen["Close"].iloc[0] - 1) * 100 if len(on_screen) else 0
     mo.md(
         f"""
         - **Crosshair:** {describe_event(events_chart.value.get("crosshair_data", {}), "move your mouse over the chart")}
         - **Last click:** {describe_event(events_chart.value.get("clicked_data", {}), "click on the chart")}
         - **Visible range:** {visible.get("from", "?")} → {visible.get("to", "?")}
+        - **Visible bars:** {describe_visible_bars(events_chart.value.get("visible_bars", {}))}
+        - **Logical range:** bars {logical.get("from", 0):.1f} → {logical.get("to", 0):.1f}
+        - **Return over the visible bars:** {len(on_screen)} rows, {visible_return:+.1f}%
         """
     )
     return
@@ -678,23 +767,24 @@ def _(mo):
     ## 8. Sparklines
 
     Small, static charts for dashboards: a short `height`, scrolling and zooming
-    turned off (`handleScroll`, `handleScale`), and the axes, grid and crosshair
-    hidden. `mo.hstack` lays several out side by side.
+    turned off with `W.interaction(scroll=False, zoom=False)`, and the axes,
+    grid and crosshair hidden. `mo.hstack` lays several out side by side.
     """)
     return
 
 
 @app.cell
 def _(W, df, mo, theme):
-    sparkline_options = {
-        **theme,
-        "handleScroll": False,
-        "handleScale": False,
-        "rightPriceScale": {"visible": False},
-        "timeScale": {"visible": False},
-        "grid": {"vertLines": {"visible": False}, "horzLines": {"visible": False}},
-        "crosshair": {"mode": 2},
-    }
+    sparkline_options = W.merge_options(
+        theme,
+        W.interaction(scroll=False, zoom=False),
+        W.time_scale(visible=False),
+        {
+            "rightPriceScale": W.price_scale(visible=False),
+            "grid": {"vertLines": {"visible": False}, "horzLines": {"visible": False}},
+            "crosshair": {"mode": 2},
+        },
+    )
     mo.hstack(
         [
             mo.ui.anywidget(W(series_data=[W.line(df, color="#26a69a")], chart_options=sparkline_options, height=120)),
@@ -710,6 +800,185 @@ def _(W, df, mo, theme):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
+    ## 9. Time axis, price axes and the mouse
+
+    Four helpers build `chart_options` without looking up Lightweight Charts'
+    option names. All take snake_case arguments; options you leave out keep
+    their current value.
+
+    - `W.time_scale(bar_spacing=, right_offset=, fix_left_edge=, fix_right_edge=, time_visible=, seconds_visible=, visible=, border_visible=)`
+      returns `{"timeScale": {...}}`. `bar_spacing` is the width of one bar in
+      pixels (the zoom level, default 6), `right_offset` leaves empty bars after
+      the latest one, and the `fix_*_edge` options stop scrolling past the first
+      or latest bar. Intraday data shows the time of day on the axis
+      automatically (and seconds only when the data has them); pass
+      `time_visible=` / `seconds_visible=` to override.
+    - `W.price_scale(mode=, visible=, border_visible=, auto_scale=, invert_scale=, margins=(top, bottom))`
+      returns options for one price scale. Put it on a series as
+      `"priceScale"` to change only that series' scale in its pane. `mode` is
+      `"normal"`, `"log"`, `"percentage"` or `"indexed"`.
+    - **Left axis:** give a series `price_scale_id="left"` and the left axis
+      appears automatically (hide it with
+      `"priceScale": W.price_scale(visible=False)`). Below, volume gets its own
+      labeled axis on the left. Showing or hiding the left or right axis
+      applies to every pane, since the panes share their axis widths; the other
+      `W.price_scale()` options apply only to the series' own pane.
+    - `W.interaction(scroll=True, zoom=True, mouse_wheel=True)` controls the
+      mouse and touch. `mouse_wheel=False` leaves the wheel to the page, so
+      scrolling down the notebook doesn't get stuck zooming the chart.
+    - `W.merge_options(theme, ...)` deep-merges any number of these dicts.
+
+    With `fit_content=True` (the default) the chart zooms to fit every bar on
+    each redraw, which overrides `bar_spacing`; the example turns it off.
+    Any other time scale option (`ticks_visible`, `min_bar_spacing`, ...) can be
+    passed by name too.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    bar_spacing = mo.ui.slider(start=2, stop=30, value=8, label="Bar spacing", show_value=True)
+    right_offset = mo.ui.slider(start=0, stop=40, value=5, label="Right offset", show_value=True)
+    fix_edges = mo.ui.checkbox(value=True, label="Stop at first/last bar")
+    wheel_zooms = mo.ui.checkbox(value=False, label="Mouse wheel zooms the chart")
+    mo.hstack([bar_spacing, right_offset, fix_edges, wheel_zooms], justify="start", gap=1.5, wrap=True)
+    return bar_spacing, fix_edges, right_offset, wheel_zooms
+
+
+@app.cell
+def _(W, bar_spacing, df, fix_edges, mo, right_offset, theme, wheel_zooms):
+    mo.ui.anywidget(
+        W(
+            series_data=[
+                W.candlestick(df),
+                # Volume on the left axis, with labels, in the bottom 25% of the pane
+                {**W.volume(df, price_scale_id="left"), "priceScale": W.price_scale(margins=(0.75, 0))},
+            ],
+            chart_options=W.merge_options(
+                theme,
+                W.time_scale(
+                    bar_spacing=bar_spacing.value,
+                    right_offset=right_offset.value,
+                    fix_left_edge=fix_edges.value,
+                    fix_right_edge=fix_edges.value and right_offset.value == 0,
+                ),
+                W.interaction(mouse_wheel=wheel_zooms.value),
+            ),
+            fit_content=False,
+            height=400,
+        )
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## 10. Line styles and hiding series
+
+    Keyword arguments to any helper become series options, written in
+    snake_case or Lightweight Charts' own camelCase (`line_style` and
+    `lineStyle` both work). Options that are numbered in Lightweight Charts
+    also take names:
+
+    | Option | Values |
+    |---|---|
+    | `line_style` | `"solid"`, `"dotted"`, `"dashed"`, `"large_dashed"`, `"sparse_dotted"` |
+    | `line_type` | `"simple"`, `"steps"`, `"curved"` |
+    | `last_price_animation` | `"disabled"`, `"continuous"` (a pulsing dot on the last value), `"on_data_update"` |
+
+    Other useful ones: `line_width=`, `point_markers_visible=True` (a dot on
+    every data point), `crosshair_marker_visible=False` and `visible=False`.
+
+    **Click a name in the legend** to hide or show that series; hidden series
+    are dimmed and struck through. `visible=False` starts a series hidden, like
+    the EMA below.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    line_type = mo.ui.dropdown(options=["simple", "steps", "curved"], value="steps", label="Close line type")
+    ma_style = mo.ui.dropdown(
+        options=["solid", "dotted", "dashed", "large_dashed", "sparse_dotted"], value="dashed", label="SMA style"
+    )
+    mo.hstack([line_type, ma_style], justify="start", gap=1)
+    return line_type, ma_style
+
+
+@app.cell
+def _(W, df, line_type, ma_style, mo, theme):
+    recent = df.tail(60)
+    mo.ui.anywidget(
+        W(
+            series_data=[
+                W.line(recent, title="Close", line_type=line_type.value, point_markers_visible=True,
+                       last_price_animation="continuous"),
+                W.sma(recent, period=10, line_style=ma_style.value, line_width=2),
+                W.ema(recent, period=10, line_width=2, visible=False),
+            ],
+            chart_options=theme,
+            height=350,
+        )
+    )
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
+    ## 11. Moving the chart from Python
+
+    Keep a reference to the widget (`chart = W(...)`, then
+    `mo.ui.anywidget(chart)`) and call these from a button or any other cell:
+
+    - `chart.show_all()`: zoom out so every bar fits.
+    - `chart.scroll_to_real_time()`: jump to the latest bar, keeping the zoom.
+    - `chart.scroll_to_position(position, animated=False)`: put the latest bar
+      `position` bars from the right edge; negative values scroll back in time.
+    - `chart.logical_range = {"from": first, "to": last}`: show exactly these
+      bars, by index. `{"from": n - 50, "to": n - 1}` shows the last 50 of `n`.
+    - `chart.visible_range = {"from": "2024-01-01", "to": "2024-06-30"}` does
+      the same with times.
+
+    The methods send a one-off command to the chart, so they also work when the
+    chart is already showing the same range. Read the result back from
+    `chart.value[...]` (section 7).
+
+    The buttons' cell refers to the widget object (`nav_chart`), not the
+    `mo.ui.anywidget` wrapper's value, so it doesn't rerun on every mouse move.
+    """)
+    return
+
+
+@app.cell
+def _(W, df, mo, theme):
+    nav_chart = W(series_data=[W.candlestick(df), W.volume(df)], chart_options=theme, height=350)
+    mo.ui.anywidget(nav_chart)
+    return (nav_chart,)
+
+
+@app.cell
+def _(mo, nav_chart):
+    bar_count = len(nav_chart.series_data[0]["data"])
+
+    def show_last(n):
+        nav_chart.logical_range = {"from": bar_count - n, "to": bar_count - 1}
+
+    # Buttons must be assigned to variables for marimo to run their on_click
+    show_all_button = mo.ui.button(label="Show all", on_click=lambda _: nav_chart.show_all())
+    last_30_button = mo.ui.button(label="Last 30 bars", on_click=lambda _: show_last(30))
+    back_30_button = mo.ui.button(label="Back 30 bars", on_click=lambda _: nav_chart.scroll_to_position(-30, animated=True))
+    latest_button = mo.ui.button(label="Latest bar", on_click=lambda _: nav_chart.scroll_to_real_time())
+    mo.hstack([show_all_button, last_30_button, back_30_button, latest_button], justify="start", gap=0.5)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md("""
     # Technical indicators with pandas-ta
 
     The `pta_` helpers compute indicators with
@@ -718,7 +987,7 @@ def _(mo):
     same scale as the price are drawn **on the price chart**; the rest
     (oscillators) get **their own pane** below it.
 
-    ## 9. Overlays on the price chart
+    ## 12. Overlays on the price chart
 
     - `W.pta_bbands(df, length=20, std=2.0)`, **Bollinger Bands**: a moving
       average with bands `std` standard deviations above and below. Wide bands
@@ -767,7 +1036,7 @@ def _(W, df, mo, overlay_dropdown, theme):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ## 10. Oscillators in panes
+    ## 13. Oscillators in panes
 
     Each oscillator helper puts its series in pane `1` (just below the price) by
     default. To stack several, give each a different `pane=`, as this example
@@ -832,7 +1101,7 @@ def _(W, df, mo, oscillator_select, rsi_length, theme):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md("""
-    ## 11. Any pandas-ta indicator
+    ## 14. Any pandas-ta indicator
 
     `W.pta(df, "name", **kwargs)` runs **any** of pandas-ta's 200+ indicators by
     name and returns a list of series, one per output column. Keyword arguments

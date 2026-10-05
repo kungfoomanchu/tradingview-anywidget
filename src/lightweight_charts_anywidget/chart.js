@@ -23,7 +23,13 @@ const SERIES_TYPES = {
 const SUB_PANE_STRETCH = 0.4;
 
 // Library defaults for the price scale options a series config can change
-const SCALE_DEFAULTS = { mode: 0, autoScale: true, invertScale: false, scaleMargins: { top: 0.2, bottom: 0.1 } };
+const SCALE_DEFAULTS = {
+  mode: 0,
+  autoScale: true,
+  invertScale: false,
+  borderVisible: true,
+  scaleMargins: { top: 0.2, bottom: 0.1 },
+};
 
 // Limit how often mouse/scroll events are sent to Python
 const CROSSHAIR_THROTTLE_MS = 100;
@@ -116,6 +122,28 @@ function render({ model, el }) {
     chart.timeScale().setVisibleRange(vr);
   }
 
+  // Intraday data (unix-second times) shows the time of day on the axis, and seconds
+  // only when some bar has them, unless chart_options.timeScale says otherwise
+  function applyAutoTimeScale() {
+    const userTimeScale = (model.get("chart_options") || {}).timeScale || {};
+    const times = seriesList.flatMap(({ config }) => (config.data || []).map((p) => p.time));
+    const intraday = times.some((t) => typeof t === "number");
+    const auto = {};
+    if (userTimeScale.timeVisible === undefined) auto.timeVisible = intraday;
+    if (userTimeScale.secondsVisible === undefined) {
+      auto.secondsVisible = intraday && times.some((t) => typeof t === "number" && t % 60 !== 0);
+    }
+    chart.applyOptions({ timeScale: auto });
+  }
+
+  function applyLogicalRange() {
+    const lr = model.get("logical_range");
+    if (!lr || lr.from === undefined || lr.to === undefined) return;
+    const current = chart.timeScale().getVisibleLogicalRange();
+    if (current && current.from === lr.from && current.to === lr.to) return;
+    chart.timeScale().setVisibleLogicalRange(lr);
+  }
+
   function renderSeries() {
     for (const { series } of seriesList) {
       chart.removeSeries(series); // also removes panes left empty
@@ -127,8 +155,8 @@ function render({ model, el }) {
     // the chart_options values so a previous render can't leak into new panes.
     const chartOptions = model.get("chart_options") || {};
     chart.applyOptions({
-      leftPriceScale: { ...SCALE_DEFAULTS, ...(chartOptions.leftPriceScale || {}) },
-      rightPriceScale: { ...SCALE_DEFAULTS, ...(chartOptions.rightPriceScale || {}) },
+      leftPriceScale: { ...SCALE_DEFAULTS, visible: false, ...(chartOptions.leftPriceScale || {}) },
+      rightPriceScale: { ...SCALE_DEFAULTS, visible: true, ...(chartOptions.rightPriceScale || {}) },
     });
 
     for (const config of model.get("series_data") || []) {
@@ -155,11 +183,27 @@ function render({ model, el }) {
 
     // Apply price scale options only once every pane exists, so they reach just
     // the series' own pane (see the reset above)
+    // Left/right axis visibility is chart-wide: Lightweight Charts lays every pane out
+    // from pane 0's setting, and a mismatch between panes breaks rendering
+    const axisVisible = {};
     for (const { series, config } of seriesList) {
-      if (config.priceScale) {
-        series.priceScale().applyOptions(config.priceScale);
+      const { visible, ...scale } = config.priceScale || {};
+      const side = config.options?.priceScaleId ?? "right";
+      if (side === "left" || side === "right") {
+        if (visible !== undefined) axisVisible[side] = visible;
+        // The left axis is hidden by default; show it when a series uses it
+        else if (side === "left" && !("left" in axisVisible)) axisVisible.left = true;
+      }
+      if (Object.keys(scale).length > 0) {
+        series.priceScale().applyOptions(scale);
       }
     }
+    if (chartOptions.leftPriceScale?.visible !== undefined) delete axisVisible.left;
+    if (chartOptions.rightPriceScale?.visible !== undefined) delete axisVisible.right;
+    for (const [side, visible] of Object.entries(axisVisible)) {
+      chart.applyOptions({ [`${side}PriceScale`]: { visible } });
+    }
+    applyAutoTimeScale();
 
     const panes = chart.panes();
     panes.forEach((pane, i) => pane.setStretchFactor(i === 0 ? 1 : SUB_PANE_STRETCH));
@@ -168,6 +212,8 @@ function render({ model, el }) {
       chart.timeScale().fitContent();
     }
     updateLegend(null);
+    // Axis widths are only known after the chart has laid itself out
+    requestAnimationFrame(() => container.isConnected && updateLegend(null));
   }
 
   // --- Legend: one per pane, showing hovered (or latest) values ---
@@ -176,6 +222,13 @@ function render({ model, el }) {
     const fmt = (v) => series.priceFormatter().format(v);
     const item = document.createElement("span");
     item.className = "lwc-legend-item";
+    const visible = series.options().visible !== false;
+    if (!visible) item.classList.add("lwc-hidden");
+    item.title = visible ? "Click to hide" : "Click to show";
+    item.addEventListener("click", () => {
+      series.applyOptions({ visible: !visible });
+      updateLegend(null);
+    });
 
     const title = series.options().title;
     if (title) {
@@ -204,6 +257,14 @@ function render({ model, el }) {
     return title || isMain ? item : null;
   }
 
+  function leftAxisWidth() {
+    try {
+      return chart.priceScale("left").width();
+    } catch {
+      return 0; // the axis has no width until the chart's first layout
+    }
+  }
+
   function updateLegend(param) {
     for (const legend of legends) legend.remove();
     legends = [];
@@ -211,7 +272,8 @@ function render({ model, el }) {
     const byPane = new Map();
     seriesList.forEach(({ series, config }, i) => {
       let data = param && param.time !== undefined ? param.seriesData.get(series) : null;
-      if (!param || param.time === undefined) {
+      // Hidden series aren't in the crosshair data; show their latest value instead
+      if (!param || param.time === undefined || (!data && series.options().visible === false)) {
         const all = series.data();
         data = all[all.length - 1];
       }
@@ -224,12 +286,15 @@ function render({ model, el }) {
     });
 
     const top = container.getBoundingClientRect().top;
+    // Keep the legend clear of the left axis when it's shown
+    const left = chart.options().leftPriceScale.visible ? leftAxisWidth() : 0;
     for (const [pane, items] of byPane) {
       const paneEl = pane.getHTMLElement();
       const legend = document.createElement("div");
       legend.className = "lwc-legend";
       legend.style.color = chart.options().layout.textColor;
       legend.style.top = `${(paneEl ? paneEl.getBoundingClientRect().top - top : 0) + 6}px`;
+      legend.style.left = `${left + 12}px`;
       legend.append(...items);
       container.appendChild(legend);
       legends.push(legend);
@@ -269,16 +334,50 @@ function render({ model, el }) {
     model.save_changes();
   });
 
-  const sendRange = debounce((range) => {
-    const current = model.get("visible_range") || {};
-    if (current.from === range.from && current.to === range.to) return;
-    model.set("visible_range", { from: range.from, to: range.to });
-    model.save_changes();
+  function sameRange(a, b) {
+    return (a || {}).from === b.from && (a || {}).to === b.to;
+  }
+
+  const sendRanges = debounce(() => {
+    const timeScale = chart.timeScale();
+    const range = timeScale.getVisibleRange();
+    const logical = timeScale.getVisibleLogicalRange();
+    if (!range || !logical) return;
+    let changed = false;
+    if (!sameRange(model.get("visible_range"), range)) {
+      model.set("visible_range", { from: range.from, to: range.to });
+      changed = true;
+    }
+    if (!sameRange(model.get("logical_range"), logical)) {
+      model.set("logical_range", { from: logical.from, to: logical.to });
+      changed = true;
+    }
+    const bars = seriesList.length > 0 ? seriesList[0].series.barsInLogicalRange(logical) : null;
+    if (bars) {
+      model.set("visible_bars", {
+        from: bars.from,
+        to: bars.to,
+        bars_before: Math.round(bars.barsBefore),
+        bars_after: Math.round(bars.barsAfter),
+      });
+      changed = true;
+    }
+    if (changed) model.save_changes();
   }, RANGE_DEBOUNCE_MS);
 
-  chart.timeScale().subscribeVisibleTimeRangeChange((range) => {
-    if (range) sendRange(range);
+  chart.timeScale().subscribeVisibleLogicalRangeChange((logical) => {
+    if (logical) sendRanges();
   });
+
+  // --- Commands: Python -> JS (widget.scroll_to_real_time() etc.) ---
+
+  function onCommand(msg) {
+    const timeScale = chart.timeScale();
+    if (msg.command === "scrollToRealTime") timeScale.scrollToRealTime();
+    else if (msg.command === "scrollToPosition") timeScale.scrollToPosition(msg.position, !!msg.animated);
+    else if (msg.command === "fitContent") timeScale.fitContent();
+  }
+  model.on("msg:custom", onCommand);
 
   // Pane heights change when the chart resizes or a pane separator is dragged
   const resizeObserver = new ResizeObserver(() => updateLegend(null));
@@ -293,6 +392,7 @@ function render({ model, el }) {
     },
     "change:chart_options": () => {
       chart.applyOptions(model.get("chart_options") || {});
+      applyAutoTimeScale();
       updateLegend(null);
     },
     "change:width": applySize,
@@ -302,6 +402,7 @@ function render({ model, el }) {
       if (model.get("fit_content")) chart.timeScale().fitContent();
     },
     "change:visible_range": applyVisibleRange,
+    "change:logical_range": applyLogicalRange,
   };
   for (const [event, handler] of Object.entries(handlers)) {
     model.on(event, handler);
@@ -311,8 +412,10 @@ function render({ model, el }) {
   renderSeries();
   applyWatermark();
   applyVisibleRange();
+  applyLogicalRange();
 
   return () => {
+    model.off("msg:custom", onCommand);
     for (const [event, handler] of Object.entries(handlers)) {
       model.off(event, handler);
     }

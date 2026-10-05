@@ -28,6 +28,14 @@ HELPERS = sorted(
 )
 
 
+# Public widget methods (navigation commands), called on a widget instance
+METHODS = sorted(
+    name
+    for name, value in vars(LightweightChartWidget).items()
+    if callable(value) and not isinstance(value, staticmethod) and not name.startswith("_")
+)
+
+
 def _demo_tree():
     return ast.parse(DEMO.read_text())
 
@@ -69,4 +77,25 @@ def test_helper_is_used_in_demo(helper):
 def test_helper_is_explained_in_demo_markdown(helper):
     assert f"W.{helper}(" in _markdown_text(_demo_tree()), (
         f"W.{helper}() is not explained in any mo.md() cell in examples/demo.py"
+    )
+
+
+def _methods_called_in_code(tree):
+    """Names of <anything>.<name>(...) calls in the demo."""
+    return {
+        node.func.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+
+
+@pytest.mark.parametrize("method", METHODS)
+def test_method_is_used_in_demo(method):
+    assert method in _methods_called_in_code(_demo_tree()), f".{method}() has no example in examples/demo.py"
+
+
+@pytest.mark.parametrize("method", METHODS)
+def test_method_is_explained_in_demo_markdown(method):
+    assert f".{method}(" in _markdown_text(_demo_tree()), (
+        f".{method}() is not explained in any mo.md() cell in examples/demo.py"
     )

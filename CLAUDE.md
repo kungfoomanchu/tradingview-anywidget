@@ -41,6 +41,11 @@ All DataFrame handling goes through `_time_values`, `_column_values`, `_line_poi
 - A whole time column gets one format: `"YYYY-MM-DD"` if every value is midnight, otherwise unix seconds (wall-clock, timezone dropped). Lightweight Charts requires one time format per series and unique ascending times.
 - Missing values are dropped, never sent as `null`.
 
+## Gotchas
+
+- Left/right price axis `visible` must be the same in every pane: Lightweight Charts lays all panes out from pane 0's setting, and a per-pane mismatch throws "Value is null" and blanks the chart. `chart.js` applies it chart-wide.
+- In the demo, a `mo.ui.button` only runs its `on_click` if it's assigned to a variable (not created inline inside `mo.hstack`). Cells with buttons that call widget methods should depend on the widget object, not the `mo.ui.anywidget` wrapper, or they rerun on every mouse move.
+
 ## Verifying changes
 
 - `uv run --extra dev pytest` - helper tests (synthetic data, no network)

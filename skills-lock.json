@@ -18,6 +18,12 @@
       "sourceType": "github",
       "skillPath": "skills/marimo-notebook/SKILL.md",
       "computedHash": "d843af038a49245369d9a91b8dda531a0d58882bc06623604b673cb144588edd"
+    },
+    "wasm-compatibility": {
+      "source": "marimo-team/skills",
+      "sourceType": "github",
+      "skillPath": "skills/wasm-compatibility/SKILL.md",
+      "computedHash": "8e195f9fa3248782c59fa834fef9a00cb1eba6cec7e3700ecfc3957d12147bbf"
     }
   }
 }

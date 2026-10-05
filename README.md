@@ -2,7 +2,7 @@
 
 A TradingView [Lightweight Charts](https://github.com/tradingview/lightweight-charts) widget for [marimo](https://marimo.io/) notebooks, built with [anywidget](https://anywidget.dev/).
 
-![Candlestick chart with volume, RSI and MACD panes](docs/screenshot.png)
+![Candlestick chart with volume, RSI and MACD panes](https://raw.githubusercontent.com/kungfoomanchu/tradingview-anywidget/main/docs/screenshot.png)
 
 ## Install
 

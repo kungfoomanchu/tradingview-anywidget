@@ -29,3 +29,8 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/tradingview_anywidget"]
+
+# Keep the source archive to the package, its tests and the demo they check: no
+# lightweight-charts submodule or agent skills
+[tool.hatch.build.targets.sdist]
+include = ["/src", "/tests", "/examples/demo.py", "/README.md", "/LICENSE", "/THIRD_PARTY_NOTICES.md"]

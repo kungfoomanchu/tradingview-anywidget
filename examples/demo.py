@@ -248,13 +248,11 @@ def _(
 
 
 @app.cell(hide_code=True)
-def _(describe_event, mo, playground):
-    mo.md(
-        f"""
-        **Crosshair:** {describe_event(playground.value.get("crosshair_data", {}), "hover over the chart")}<br>
-        **Last click:** {describe_event(playground.value.get("clicked_data", {}), "click on the chart")}
-        """
-    )
+def _(mo, playground):
+    mo.md(f"""
+    **Crosshair:** {describe_event(playground.value.get("crosshair_data", {}), "hover over the chart")}<br>
+    **Last click:** {describe_event(playground.value.get("clicked_data", {}), "click on the chart")}
+    """)
     return
 
 
@@ -647,25 +645,22 @@ def _(W, df, mo, theme):
     return (events_chart,)
 
 
-@app.cell
-def _():
-    def describe_event(event, empty_text):
-        """One-line summary of a crosshair or click event on a candlestick chart."""
-        if not event.get("series_values"):
-            return empty_text
-        bar = event["series_values"][0]
-        if "close" not in bar:
-            return f"`{event['time']}` · **{bar['value']:.2f}**"
-        return (
-            f"`{event['time']}` · O **{bar['open']:.2f}** H **{bar['high']:.2f}** "
-            f"L **{bar['low']:.2f}** C **{bar['close']:.2f}**"
-        )
-
-    return (describe_event,)
+@app.function
+def describe_event(event, empty_text):
+    """One-line summary of a crosshair or click event on a candlestick chart."""
+    if not event.get("series_values"):
+        return empty_text
+    bar = event["series_values"][0]
+    if "close" not in bar:
+        return f"`{event['time']}` · **{bar['value']:.2f}**"
+    return (
+        f"`{event['time']}` · O **{bar['open']:.2f}** H **{bar['high']:.2f}** "
+        f"L **{bar['low']:.2f}** C **{bar['close']:.2f}**"
+    )
 
 
 @app.cell
-def _(describe_event, events_chart, mo):
+def _(events_chart, mo):
     visible = events_chart.value.get("visible_range", {})
     mo.md(
         f"""

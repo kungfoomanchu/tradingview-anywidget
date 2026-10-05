@@ -1,4 +1,4 @@
-# tradingview-anywidget
+# lightweight-charts-anywidget
 
 A TradingView [Lightweight Charts](https://github.com/tradingview/lightweight-charts) widget for [marimo](https://marimo.io/) notebooks, built with [anywidget](https://anywidget.dev/).
 
@@ -9,7 +9,7 @@ A TradingView [Lightweight Charts](https://github.com/tradingview/lightweight-ch
 Not on PyPI yet; install from GitHub:
 
 ```bash
-uv pip install "tradingview-anywidget @ git+https://github.com/kungfoomanchu/tradingview-anywidget"
+uv pip install "lightweight-charts-anywidget @ git+https://github.com/kungfoomanchu/tradingview-anywidget"
 # optional: technical indicators via pandas-ta
 uv pip install pandas-ta
 ```
@@ -18,7 +18,7 @@ uv pip install pandas-ta
 
 ```python
 import marimo as mo
-from tradingview_anywidget import LightweightChartWidget
+from lightweight_charts_anywidget import LightweightChartWidget
 
 W = LightweightChartWidget
 
@@ -172,7 +172,7 @@ git add lightweight-charts
 git commit -m "Update lightweight-charts submodule"
 ```
 
-Then bump the CDN import in `src/tradingview_anywidget/chart.js` (`lightweight-charts@5.x`)
+Then bump the CDN import in `src/lightweight_charts_anywidget/chart.js` (`lightweight-charts@5.x`)
 to the same minor version and check `website/docs/release-notes.md` for API changes.
 
 ### Run the tests

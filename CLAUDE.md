@@ -53,9 +53,9 @@ All DataFrame handling goes through `_time_values`, `_column_values`, `_line_poi
 
 ## Project Structure
 
-- `src/tradingview_anywidget/__init__.py` - Widget class + Python helpers
-- `src/tradingview_anywidget/chart.js` - ESM module (imports lightweight-charts v5.2 from CDN; keep in step with the submodule)
-- `src/tradingview_anywidget/chart.css` - Minimal styles (legend colors come from the chart theme)
+- `src/lightweight_charts_anywidget/__init__.py` - Widget class + Python helpers
+- `src/lightweight_charts_anywidget/chart.js` - ESM module (imports lightweight-charts v5.2 from CDN; keep in step with the submodule)
+- `src/lightweight_charts_anywidget/chart.css` - Minimal styles (legend colors come from the chart theme)
 - `tests/test_helpers.py` - pytest tests for the Python helpers
 - `tests/test_demo_docs.py` - checks every public helper is shown and explained in the demo
 - `examples/demo.py` - Marimo notebook: interactive playground + feature reference (see "Keeping the demo notebook in sync")

@@ -5,11 +5,11 @@
 #     "yfinance>=0.2.0",
 #     "pandas>=1.5.0",
 #     "pandas-ta>=0.3.14b",
-#     "tradingview-anywidget",
+#     "lightweight-charts-anywidget",
 # ]
 #
 # [tool.uv.sources]
-# tradingview-anywidget = { path = "..", editable = true }
+# lightweight-charts-anywidget = { path = "..", editable = true }
 # ///
 
 import marimo
@@ -22,7 +22,7 @@ app = marimo.App(width="full")
 def _():
     import marimo as mo
     import yfinance as yf
-    from tradingview_anywidget import LightweightChartWidget
+    from lightweight_charts_anywidget import LightweightChartWidget
 
     W = LightweightChartWidget
     return W, mo, yf
@@ -33,7 +33,7 @@ def _(mo):
     mo.md("""
     # TradingView Lightweight Charts for marimo
 
-    `tradingview-anywidget` puts TradingView's
+    `lightweight-charts-anywidget` puts TradingView's
     [Lightweight Charts™](https://tradingview.github.io/lightweight-charts/) (v5)
     into marimo notebooks. You build charts in Python from a pandas or polars
     DataFrame, and the chart reports mouse and scroll events back to Python.

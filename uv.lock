@@ -469,6 +469,55 @@ wheels = [
 ]
 
 [[package]]
+name = "lightweight-charts-anywidget"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "anywidget" },
+    { name = "traitlets" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "marimo" },
+    { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14'" },
+    { name = "pandas", version = "3.0.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14'" },
+    { name = "pandas-ta" },
+    { name = "polars" },
+    { name = "pytest" },
+    { name = "yfinance" },
+]
+pandas = [
+    { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14'" },
+    { name = "pandas", version = "3.0.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14'" },
+]
+polars = [
+    { name = "polars" },
+]
+ta = [
+    { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14'" },
+    { name = "pandas", version = "3.0.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14'" },
+    { name = "pandas-ta" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "anywidget", specifier = ">=0.9.0" },
+    { name = "marimo", marker = "extra == 'dev'", specifier = ">=0.25.1" },
+    { name = "pandas", marker = "extra == 'dev'", specifier = ">=1.5.0" },
+    { name = "pandas", marker = "extra == 'pandas'", specifier = ">=1.5.0" },
+    { name = "pandas", marker = "extra == 'ta'", specifier = ">=1.5.0" },
+    { name = "pandas-ta", marker = "extra == 'dev'", specifier = ">=0.3.14b0" },
+    { name = "pandas-ta", marker = "extra == 'ta'", specifier = ">=0.3.14b0" },
+    { name = "polars", marker = "extra == 'dev'", specifier = ">=0.20.0" },
+    { name = "polars", marker = "extra == 'polars'", specifier = ">=0.20.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
+    { name = "traitlets", specifier = ">=5.0.0" },
+    { name = "yfinance", marker = "extra == 'dev'", specifier = ">=0.2.0" },
+]
+provides-extras = ["pandas", "polars", "ta", "dev"]
+
+[[package]]
 name = "llvmlite"
 version = "0.44.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1427,55 +1476,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/0d/ea/b2a5bd54b28a324da
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a7/03/921a3d3c75785aca9ebfbfcabfbc3a1be12e2ab5265deb026d55a5a3f83e/tqdm-4.70.1-py3-none-any.whl", hash = "sha256:c293e525e6fef9c20e8728fd4612df02a0aa31bb5fe91ecd93e123b1b7bffa73", size = 80199, upload-time = "2026-09-11T07:25:14.599Z" },
 ]
-
-[[package]]
-name = "tradingview-anywidget"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "anywidget" },
-    { name = "traitlets" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "marimo" },
-    { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14'" },
-    { name = "pandas", version = "3.0.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14'" },
-    { name = "pandas-ta" },
-    { name = "polars" },
-    { name = "pytest" },
-    { name = "yfinance" },
-]
-pandas = [
-    { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14'" },
-    { name = "pandas", version = "3.0.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14'" },
-]
-polars = [
-    { name = "polars" },
-]
-ta = [
-    { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14'" },
-    { name = "pandas", version = "3.0.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14'" },
-    { name = "pandas-ta" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "anywidget", specifier = ">=0.9.0" },
-    { name = "marimo", marker = "extra == 'dev'", specifier = ">=0.25.1" },
-    { name = "pandas", marker = "extra == 'dev'", specifier = ">=1.5.0" },
-    { name = "pandas", marker = "extra == 'pandas'", specifier = ">=1.5.0" },
-    { name = "pandas", marker = "extra == 'ta'", specifier = ">=1.5.0" },
-    { name = "pandas-ta", marker = "extra == 'dev'", specifier = ">=0.3.14b0" },
-    { name = "pandas-ta", marker = "extra == 'ta'", specifier = ">=0.3.14b0" },
-    { name = "polars", marker = "extra == 'dev'", specifier = ">=0.20.0" },
-    { name = "polars", marker = "extra == 'polars'", specifier = ">=0.20.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
-    { name = "traitlets", specifier = ">=5.0.0" },
-    { name = "yfinance", marker = "extra == 'dev'", specifier = ">=0.2.0" },
-]
-provides-extras = ["pandas", "polars", "ta", "dev"]
 
 [[package]]
 name = "traitlets"

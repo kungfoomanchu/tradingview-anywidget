@@ -3,7 +3,7 @@ import pandas as pd
 import polars as pl
 import pytest
 
-from tradingview_anywidget import LightweightChartWidget as W
+from lightweight_charts_anywidget import LightweightChartWidget as W
 
 
 @pytest.fixture

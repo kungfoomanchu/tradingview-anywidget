@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from tradingview_anywidget import LightweightChartWidget
+from lightweight_charts_anywidget import LightweightChartWidget
 
 DEMO = Path(__file__).parent.parent / "examples" / "demo.py"
 

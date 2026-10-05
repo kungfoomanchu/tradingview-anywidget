@@ -54,9 +54,10 @@ All DataFrame handling goes through `_time_values`, `_column_values`, `_line_poi
 ## Project Structure
 
 - `src/lightweight_charts_anywidget/__init__.py` - Widget class + Python helpers
-- `src/lightweight_charts_anywidget/chart.js` - ESM module (imports lightweight-charts v5.2 from CDN; keep in step with the submodule)
+- `src/lightweight_charts_anywidget/chart.js` - ESM module (imports the latest lightweight-charts 5.2.x release from the esm.sh CDN; bump the minor version when a new release lands in the submodule)
 - `src/lightweight_charts_anywidget/chart.css` - Minimal styles (legend colors come from the chart theme)
 - `tests/test_helpers.py` - pytest tests for the Python helpers
 - `tests/test_demo_docs.py` - checks every public helper is shown and explained in the demo
 - `examples/demo.py` - Marimo notebook: interactive playground + feature reference (see "Keeping the demo notebook in sync")
-- `lightweight-charts/` - Git submodule (reference only, not a build dependency)
+- `lightweight-charts/` - Git submodule of TradingView's source, tracking `master` (reference only, not used at runtime or packaged). It may be ahead of the latest release; when debugging behavior users see, read the released code via the tag (`git -C lightweight-charts diff vX.Y.Z -- src`).
+- `tests/test_lightweight_charts_version.py` - fails when the submodule has a newer release than the CDN import in `chart.js`; then bump the import, read the release notes, and re-test

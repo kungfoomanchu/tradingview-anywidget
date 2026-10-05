@@ -150,9 +150,21 @@ Features that **cannot** be accessed via passthrough (and require JS changes) in
 
 ## Development
 
-### Clone with submodule
+### How the widget uses lightweight-charts
 
-The [lightweight-charts](https://github.com/tradingview/lightweight-charts) source is included as a git submodule for reference. When cloning, pull it in with:
+The widget runs TradingView's official **published release** of
+[Lightweight Charts™](https://github.com/tradingview/lightweight-charts): `chart.js`
+imports it from the esm.sh CDN as `lightweight-charts@5.2`, which serves the newest
+5.2.x release. Bug-fix releases therefore reach users automatically; new minor or
+major versions need the import updated (see below).
+
+The `lightweight-charts/` folder is a **git submodule with TradingView's source code,
+for reference only**: reading the API, debugging and release notes. It is not used at
+runtime and is not included in the PyPI package. It tracks TradingView's `master`
+branch, so it can contain changes that aren't released yet; the released code is
+available inside it as tags (e.g. `git -C lightweight-charts diff v5.2.1 -- src`).
+
+When cloning, pull it in with:
 
 ```bash
 git clone --recurse-submodules <repo-url>
@@ -172,8 +184,11 @@ git add lightweight-charts
 git commit -m "Update lightweight-charts submodule"
 ```
 
-Then bump the CDN import in `src/lightweight_charts_anywidget/chart.js` (`lightweight-charts@5.x`)
-to the same minor version and check `website/docs/release-notes.md` for API changes.
+If the pull brings in a new TradingView release, `tests/test_lightweight_charts_version.py`
+fails until the CDN import in `src/lightweight_charts_anywidget/chart.js` matches it.
+To upgrade: change `lightweight-charts@5.x` to the new minor version, read
+`lightweight-charts/website/docs/release-notes.md` for API changes, run the tests and
+check the demo notebook.
 
 ### Run the tests
 
